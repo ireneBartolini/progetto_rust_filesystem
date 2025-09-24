@@ -1,8 +1,6 @@
 use server::FileSystem;
 
 
-
-
 fn create_file_system_with_structure() -> FileSystem {
     let mut fs = FileSystem::new();
     fs.make_dir("/", "home").unwrap();
