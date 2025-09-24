@@ -1,23 +1,26 @@
-.vscode
 
-# Output di build
-/target/
-
-# File temporanei di Cargo
-**/*.rs.bk
-Cargo.lock
-
-# File di sistema/macOS
-.DS_Store
-
-# File di editor/IDE
+# IDE/editor config
+.vscode/
+.idea/
+*.code-workspace
 *.swp
 *.swo
 *.tmp
 *.bak
-*.vscode/
-.idea/
-*.code-workspace
+
+# Build output (tutte le cartelle target)
+target/
+**/target/
+
+# File temporanei di Cargo
+**/*.rs.bk
+
+# File di sistema/macOS
+.DS_Store
 
 # File di test temporanei
-/tests/tmp/
+tests/tmp/
+**/tmp/
+
+# Blocca file lock solo se non vuoi versionarlo (opzionale)
+# Cargo.lock
