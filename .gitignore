@@ -1,1 +1,23 @@
 .vscode
+
+# Output di build
+/target/
+
+# File temporanei di Cargo
+**/*.rs.bk
+Cargo.lock
+
+# File di sistema/macOS
+.DS_Store
+
+# File di editor/IDE
+*.swp
+*.swo
+*.tmp
+*.bak
+*.vscode/
+.idea/
+*.code-workspace
+
+# File di test temporanei
+/tests/tmp/
