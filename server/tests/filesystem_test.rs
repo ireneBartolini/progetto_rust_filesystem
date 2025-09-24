@@ -42,6 +42,19 @@ fn test_follow_link() {
 
 #[test]
 fn test_side_effects() {
+    use std::fs;
+    use std::path::Path;
+
+    let tmp_path = Path::new("/tmp");
+    if !tmp_path.exists() {
+        fs::create_dir_all(tmp_path).unwrap();
+    }
+
+    let test_dir_path = "/tmp/test_dir";
+
+    // Pulisci eventuali residui da test precedenti
+    let _ = fs::remove_dir_all(test_dir_path);
+
     let mut fs =  FileSystem::new();
     fs.set_side_effects(true);
     fs.set_real_path("/tmp"); //fs real path
@@ -55,7 +68,10 @@ fn test_side_effects() {
     fs.delete("/test_dir/dir1").unwrap();
     
     // uncommento to delete all
-    // fs.delete("/test_dir").unwrap();
+    fs.delete("/test_dir").unwrap();
+
+    // Pulisci la directory di test alla fine
+    let _ = fs::remove_dir_all(test_dir_path);
     
     assert!(true); 
 }
