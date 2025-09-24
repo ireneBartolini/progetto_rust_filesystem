@@ -7,3 +7,7 @@ edition = "2021"
 
 [dependencies]
 walkdir = "2.3"
+
+[lib]
+name = "server"
+path = "src/filesystem.rs"
