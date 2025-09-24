@@ -43,7 +43,23 @@ async fn delete_file(Path(path): Path<String>) -> impl IntoResponse {
     "ok"
 }
 
-async fn mkdir(Path(path): Path<String>) -> impl IntoResponse {
+async fn mkdir(path: &str) -> impl IntoResponse {
     // Crea la directory
-    "ok"
+
+    let mut fs =  FileSystem::new();
+    fs.set_side_effects(true);
+    fs.set_real_path("remote-fs");
+
+    let path = Path::new(path);
+    
+    let old_dir=path.parent() // Ottieni il percorso senza l'ultima cartella
+        .map(|p| p.to_str().unwrap_or("").to_string());// Converti in String
+    let new_dir=path.file_name() // Ottieni il nome dell'ultima cartella
+        .map(|f| f.to_str().unwrap_or("").to_string());// Converti in String
+
+    let result=fs.make_dir(old_dir, new_dir);
+    match result {
+        Ok(_) => "Directory created successfully",
+        Err(e) => e.as_str(),
+    }
 }
