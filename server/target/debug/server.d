@@ -1,1 +1,1 @@
-/home/os161user/Desktop/progetto/server/target/debug/server: /home/os161user/Desktop/progetto/server/src/filesystem.rs /home/os161user/Desktop/progetto/server/src/main.rs
+/Users/alessandrobenvenuti/Desktop/Università/Programmazione\ di\ sistema/progetto/progetto_rust_filesystem/server/target/debug/server: /Users/alessandrobenvenuti/Desktop/Università/Programmazione\ di\ sistema/progetto/progetto_rust_filesystem/server/src/filesystem.rs /Users/alessandrobenvenuti/Desktop/Università/Programmazione\ di\ sistema/progetto/progetto_rust_filesystem/server/src/main.rs

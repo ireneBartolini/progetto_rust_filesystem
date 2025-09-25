@@ -42,13 +42,11 @@ async fn list_dir(
     // Acquire the lock on the file system
     let mut fs = fs.lock().unwrap();
 
-    println!("{}", path);
-
     // go to the directory
-    let res = fs.change_dir(&path);
+    let res = fs.change_dir(&format!("/{}", path));
 
     match res{
-        Ok(_) => Json(vec!["file1.txt".to_string(), "dir1".to_string()]).into_response(),
+        Ok(_) => Json(fs.list_contents()).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(vec![e]),
@@ -104,7 +102,7 @@ async fn mkdir(
 
     let result=fs.make_dir(&format!("/{}", old_dir.unwrap()), &new_dir.unwrap());
 
-    
+
     match result{
         Ok(_) => "Directory created successfully".into_response(),
         Err(e) => (
