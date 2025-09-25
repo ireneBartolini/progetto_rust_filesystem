@@ -452,6 +452,48 @@ impl FileSystem {
         self.side_effects = side_effects;
     }
 
+    pub fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
+        let node = self.find(path);
+        if let Some(n) = node {
+            let lock = n.lock().unwrap();
+            match &*lock {
+                FSItem::File(_) => {
+                    if self.side_effects {
+                        drop(lock);
+                        let real_path = self.make_real_path(n.clone());
+                        fs::write(&real_path, content).map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                },
+                _ => Err(format!("{} is not a file", path)),
+            }
+        } else {
+            Err(format!("File {} not found", path))
+        }
+    }
+
+    pub fn read_file (&self, path: &str) -> Result<String, String> {
+        let node = self.find(path);
+        if let Some(n) = node {
+            let lock = n.lock().unwrap();
+            match &*lock {
+                FSItem::File(_) => {
+                    if self.side_effects {
+                        drop(lock);
+                        let real_path = self.make_real_path(n.clone());
+                        let content = fs::read_to_string(&real_path).map_err(|e| e.to_string())?;
+                        Ok(content)
+                    } else {
+                        Ok(String::new()) // if side effects are disabled, return empty content
+                    }
+                },
+                _ => Err(format!("{} is not a file", path)),
+            }
+        } else {
+            Err(format!("File {} not found", path))
+        }
+    }
+
 }
 
 

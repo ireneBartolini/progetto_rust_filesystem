@@ -59,15 +59,34 @@ async fn read_file(
     Path(path): Path<String>
 ) -> impl IntoResponse {
     // Leggi il file e restituisci i dati
-    "contenuto del file"
+    let mut fs = fs.lock().unwrap();
+    let result=fs.read_file(path.as_str());
+    match result{
+        Ok(content) => content.into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
+    }
 }
 
 async fn write_file(
     State(fs): State<Arc<Mutex<FileSystem>>>,
-    Path(path): Path<String>, body: String
+    Path(path): Path<String>, 
+    body: String
 ) -> impl IntoResponse {
-    // Scrivi il file con il contenuto ricevuto
-    "ok"
+    // Scrivi il file con il contenuto ricevuto 
+
+    //DA TESTARE COME PASSARE IL CONTENUTO 
+    let mut fs = fs.lock().unwrap();
+    let result=fs.write_file(path.as_str(), body.as_str());
+    match result{
+        Ok(_) => "File written successfully".into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
+    }
 }
 
 async fn delete_file(
@@ -78,9 +97,13 @@ async fn delete_file(
     let mut fs = fs.lock().unwrap();
     
     let result=fs.delete(path.as_str());
-    match result {
-        Ok(_) => "File/Directory deleted successfully",
-        Err(err) => "errore",
+
+    match result{
+        Ok(_) => "Directory/File deleted successfully".into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
     }
 }
 
