@@ -77,7 +77,13 @@ async fn delete_file(
     Path(path): Path<String>
 ) -> impl IntoResponse {
     // Cancella file o directory
-    "ok"
+    let mut fs = fs.lock().unwrap();
+    
+    let result=fs.delete(path.as_str());
+    match result {
+        Ok(_) => "File/Directory deleted successfully",
+        Err(err) => "errore",
+    }
 }
 
 async fn mkdir(

@@ -176,13 +176,20 @@ impl FileSystem {
 
 
     fn make_real_path(&self, node: FSNode) -> String {
-        let mut abs_path = node.lock().unwrap().abs_path();
+        
+        let lock= node.lock().unwrap();
+        let mut abs_path=lock.abs_path();
+        let name= (lock.name()).clone();
+
         while abs_path.starts_with("/") {
             abs_path = abs_path[1..].to_string();
-        }
+            
+        } 
+       
+        
         let real_path = PathBuf::from(&self.real_path)
             .join(&abs_path)
-            .join(node.lock().unwrap().name());
+            .join(name);
 
         return real_path.to_str().unwrap().to_string();
     }
@@ -390,20 +397,25 @@ impl FileSystem {
     }
 
     pub fn delete(&self, path: &str) -> Result<(), String> {
-        let node = self.find(path);
+        let node:  Option<FSNode>  = self.find(path);
         if let Some(n) = node {
             
             if self.side_effects {
-                match n.lock().unwrap().deref() {
+                let item=n.lock().unwrap();
+                match  *item{
                     FSItem::File(_) => {
+                        drop(item);
                         let real_path = self.make_real_path(n.clone());
                         fs::remove_file(&real_path).map_err(|e| e.to_string())?;
                     }
                     FSItem::Directory(_) => {
+                        drop(item);
                         let real_path = self.make_real_path(n.clone());
                         fs::remove_dir_all(&real_path).map_err(|e| e.to_string())?;
+                        
                     }
                     FSItem::SymLink(_) => {
+                        drop(item);
                         let real_path = self.make_real_path(n.clone());
                         fs::remove_file(&real_path).map_err(|e| e.to_string())?;
                     }
@@ -411,13 +423,20 @@ impl FileSystem {
             
             }
 
-            if let Some(parent) = n.lock().unwrap().parent().upgrade() {
-                parent.lock().unwrap().remove(&n.lock().unwrap().name());
+            let lock  = n.lock().unwrap();
+            let name= (lock.name()).clone().to_string();
+            let par= lock.parent();
+            if let Some(parent) = par.upgrade(){
+                
+                drop(lock);
+                parent.lock().unwrap().remove(&name);
             }
+           
             Ok(())
         } else {
             Err(format!("Item {} not found", path))
         }
+        
     }
 
     pub fn set_side_effects(&mut self, side_effects: bool) {
