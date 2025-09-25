@@ -11,6 +11,8 @@ use std::net::SocketAddr;
 async fn main() {
     // The access to the FileSystem is handled through a Mutex, in order to avoid concurrent accesses
     let fs = Arc::new(Mutex::new(FileSystem::new()));
+    fs.lock().unwrap().set_side_effects(true);
+    fs.lock().unwrap().set_real_path("remote-fs");
 
     let app = Router::new()
         .route("/list/*path", get(list_dir))
@@ -30,22 +32,34 @@ async fn main() {
 }
 
 // Handlers (da implementare)
-async fn list_dir(Path(path): Path<String>) -> impl IntoResponse {
+async fn list_dir(
+    State(fs): State<Arc<Mutex<FileSystem>>>,
+    Path(path): Path<String>
+) -> impl IntoResponse {
     // Leggi la directory e restituisci la lista di file/dir in JSON
     Json(vec!["file1.txt", "dir1"])
 }
 
-async fn read_file(Path(path): Path<String>) -> impl IntoResponse {
+async fn read_file(
+    State(fs): State<Arc<Mutex<FileSystem>>>,
+    Path(path): Path<String>
+) -> impl IntoResponse {
     // Leggi il file e restituisci i dati
     "contenuto del file"
 }
 
-async fn write_file(Path(path): Path<String>, body: String) -> impl IntoResponse {
+async fn write_file(
+    State(fs): State<Arc<Mutex<FileSystem>>>,
+    Path(path): Path<String>, body: String
+) -> impl IntoResponse {
     // Scrivi il file con il contenuto ricevuto
     "ok"
 }
 
-async fn delete_file(Path(path): Path<String>) -> impl IntoResponse {
+async fn delete_file(
+    State(fs): State<Arc<Mutex<FileSystem>>>,
+    Path(path): Path<String>
+) -> impl IntoResponse {
     // Cancella file o directory
     "ok"
 }
@@ -56,9 +70,7 @@ async fn mkdir(
 ) -> impl IntoResponse {
     // Crea la directory
 
-    let mut fs =  FileSystem::new();
-    fs.set_side_effects(true);
-    fs.set_real_path("remote-fs");
+    let mut fs = fs.lock().unwrap();
 
     let path = StdPath::new(&path);
     
