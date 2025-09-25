@@ -293,6 +293,15 @@ impl FileSystem {
         }
     }
 
+    pub fn list_contents(&self) -> Option<Vec<String>>{
+        if let Some(res) = self.current.lock().unwrap().get_children(){
+            Some(res.iter().map(|child| child.lock().unwrap().name().to_string()).collect())
+        }
+        else{
+            None
+        }
+    }
+
     pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String> {
         if let Some(node) = self.find(path) {
 
