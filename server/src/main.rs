@@ -98,6 +98,7 @@ async fn mkdir(
 
     let result=fs.make_dir(&format!("/{}", old_dir.unwrap()), &new_dir.unwrap());
 
+    
     match result{
         Ok(_) => "Directory created successfully".into_response(),
         Err(e) => (
