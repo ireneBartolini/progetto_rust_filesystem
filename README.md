@@ -34,3 +34,18 @@ DELETE /files/<path> – Delete file or directory
 - Support for large files (100MB+) with streaming read/write
 - Reasonable latency (<500ms for operations under normal network conditions)
 
+# CHIAMATE API
+
+## List directory contents
+
+## read file content 
+curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt
+
+## write file content
+curl -X PUT http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt      -H "Content-Type: text/plain"      -d "ciao mondo"
+
+## make dir 
+curl -X POST http://127.0.0.1:8080/mkdir/nuova_dir
+
+## delete 
+curl -X DELETE http://127.0.0.1:8080/files/nuova_dir

@@ -73,13 +73,13 @@ async fn read_file(
 async fn write_file(
     State(fs): State<Arc<Mutex<FileSystem>>>,
     Path(path): Path<String>, 
-    body: String
+    body: String,
 ) -> impl IntoResponse {
     // Scrivi il file con il contenuto ricevuto 
-
+    println!("Writing in file: {}", body.to_string());
     //DA TESTARE COME PASSARE IL CONTENUTO 
     let mut fs = fs.lock().unwrap();
-    let result=fs.write_file(path.as_str(), body.as_str());
+    let result=fs.write_file(path.as_str(), &body);
     match result{
         Ok(_) => "File written successfully".into_response(),
         Err(e) => (
