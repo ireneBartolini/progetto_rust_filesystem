@@ -219,6 +219,14 @@ impl FileSystem {
                     } else if part == ".." {
                         d.parent.upgrade().unwrap()
                     } else {
+
+                        // DEBUG: print current directory contents
+                        /* 
+                        for x in d.children.iter(){
+                            println!("{:?}", x.lock().unwrap().name())
+                        }
+                        */
+
                         let item = d
                             .children
                             .iter()

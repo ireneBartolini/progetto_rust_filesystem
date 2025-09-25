@@ -4,15 +4,16 @@ use std::path::Path as StdPath;
 use axum::{
     routing::{get, put, post, delete},
     Router, extract::Path, extract::State, response::IntoResponse, Json,
+    http::StatusCode,
 };
 use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
     // The access to the FileSystem is handled through a Mutex, in order to avoid concurrent accesses
-    let fs = Arc::new(Mutex::new(FileSystem::new()));
+    let fs = Arc::new(Mutex::new(FileSystem::from_file_system("remote-fs")));
     fs.lock().unwrap().set_side_effects(true);
-    fs.lock().unwrap().set_real_path("remote-fs");
+
 
     let app = Router::new()
         .route("/list/*path", get(list_dir))
@@ -36,8 +37,23 @@ async fn list_dir(
     State(fs): State<Arc<Mutex<FileSystem>>>,
     Path(path): Path<String>
 ) -> impl IntoResponse {
-    // Leggi la directory e restituisci la lista di file/dir in JSON
-    Json(vec!["file1.txt", "dir1"])
+    // Read the directory and return the list of files/directories in JSON
+
+    // Acquire the lock on the file system
+    let mut fs = fs.lock().unwrap();
+
+    println!("{}", path);
+
+    // go to the directory
+    let res = fs.change_dir(&path);
+
+    match res{
+        Ok(_) => Json(vec!["file1.txt".to_string(), "dir1".to_string()]).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(vec![e]),
+        ).into_response(),
+    }
 }
 
 async fn read_file(
@@ -76,12 +92,17 @@ async fn mkdir(
     
     let old_dir=path.parent() // Ottieni il percorso senza l'ultima cartella
         .map(|p| p.to_str().unwrap_or("").to_string());// Converti in String
+
     let new_dir=path.file_name() // Ottieni il nome dell'ultima cartella
         .map(|f| f.to_str().unwrap_or("").to_string());// Converti in String
 
-    let result=fs.make_dir(&old_dir.unwrap(), &new_dir.unwrap());
-    match result {
-        Ok(_) => "Directory created successfully",
-        Err(e) => "errore",
+    let result=fs.make_dir(&format!("/{}", old_dir.unwrap()), &new_dir.unwrap());
+
+    match result{
+        Ok(_) => "Directory created successfully".into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
     }
 }
