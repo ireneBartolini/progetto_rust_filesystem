@@ -1,9 +1,8 @@
 pub mod filesystem_mod{
 
-use std::cell::RefCell;
+use std::sync::{Arc, Mutex, Weak};
 use std::ops::Deref;
 use std::path::PathBuf;
-use std::rc::{Rc, Weak};
 
 use std::fs;
 
@@ -56,7 +55,7 @@ impl FSItem {
     pub fn remove(&mut self, name: &str) {
         match self {
             FSItem::Directory(d) => {
-                d.children.retain(|child| child.borrow().name() != name);
+                d.children.retain(|child| child.lock().unwrap().name() != name);
             }
             _ => panic!("Cannot remove item from non-directory"),
         }
@@ -76,9 +75,9 @@ impl FSItem {
         let mut current = self.parent().upgrade();
 
         while let Some(node) = current {
-            let name = node.borrow().name().to_string();
+            let name = node.lock().unwrap().name().to_string();
             parts.insert(0, name);
-            current = node.borrow().parent().upgrade();
+            current = node.lock().unwrap().parent().upgrade();
         }
 
         if parts.len() < 2 {
@@ -91,8 +90,8 @@ impl FSItem {
 
 }
 
-type FSItemCell = RefCell<FSItem>;
-type FSNode = Rc<FSItemCell>;
+type FSItemCell = Mutex<FSItem>;
+type FSNode = Arc<FSItemCell>;
 type FSNodeWeak = Weak<FSItemCell>;
 
 pub struct File {
@@ -122,7 +121,7 @@ pub struct FileSystem {
 
 impl FileSystem {
     pub fn new() -> Self {
-        let root = Rc::new(RefCell::new(FSItem::Directory(Directory {
+        let root = Arc::new(Mutex::new(FSItem::Directory(Directory {
             name: "".to_string(),
             parent: Weak::new(),
             children: vec![],
@@ -177,13 +176,13 @@ impl FileSystem {
 
 
     fn make_real_path(&self, node: FSNode) -> String {
-        let mut abs_path = node.borrow().abs_path();
+        let mut abs_path = node.lock().unwrap().abs_path();
         while abs_path.starts_with("/") {
             abs_path = abs_path[1..].to_string();
         }
         let real_path = PathBuf::from(&self.real_path)
             .join(&abs_path)
-            .join(node.borrow().name());
+            .join(node.lock().unwrap().name());
 
         return real_path.to_str().unwrap().to_string();
     }
@@ -213,7 +212,7 @@ impl FileSystem {
         };
 
         for part in parts {
-            let next_node = match current.borrow().deref() {
+            let next_node = match current.lock().unwrap().deref() {
                 FSItem::Directory(d) => {
                     if part == "." {
                         current.clone()
@@ -223,7 +222,7 @@ impl FileSystem {
                         let item = d
                             .children
                             .iter()
-                            .find(|&child| child.borrow().name() == part);
+                            .find(|&child| child.lock().unwrap().name() == part);
 
                         if let Some(item) = item {
                             item.clone()
@@ -233,7 +232,7 @@ impl FileSystem {
                     }
                 },
                 FSItem::SymLink(link) => {
-                    let path = current.borrow().abs_path();
+                    let path = current.lock().unwrap().abs_path();
                     let target = self.follow_link(&path, &link);
                     if let Some(target) = target {
                         target
@@ -256,11 +255,11 @@ impl FileSystem {
 
         let node = self.find_full(&link.target, Some(path));
         if let Some(node) = node {
-            match node.borrow().deref() {
+            match node.lock().unwrap().deref() {
                 FSItem::Directory(_) => return Some(node.clone()),
                 FSItem::File(_) => return Some(node.clone()),
                 FSItem::SymLink(ref link) => {
-                    let path = node.borrow().abs_path();
+                    let path = node.lock().unwrap().abs_path();
                     return self.follow_link(&path, link)
                 },
             }
@@ -293,12 +292,12 @@ impl FileSystem {
 
             let new_dir = FSItem::Directory(Directory {
                 name: name.to_string(),
-                parent: Rc::downgrade(&node),
+                parent: Arc::downgrade(&node),
                 children: vec![],
             });
             
-            let new_node = Rc::new(RefCell::new(new_dir));
-            node.borrow_mut().add(new_node.clone());
+            let new_node = Arc::new(Mutex::new(new_dir));
+            node.lock().unwrap().add(new_node.clone());
             
             Ok(())
         } else {
@@ -320,11 +319,11 @@ impl FileSystem {
             let new_file = FSItem::File(File {
                 name: name.to_string(),
                 size: 0,
-                parent: Rc::downgrade(&node),
+                parent: Arc::downgrade(&node),
             });
 
-            let new_node = Rc::new(RefCell::new(new_file));
-            node.borrow_mut().add(new_node.clone());
+            let new_node = Arc::new(Mutex::new(new_file));
+            node.lock().unwrap().add(new_node.clone());
             Ok(())
         }
         else {
@@ -350,11 +349,11 @@ impl FileSystem {
             let new_link = FSItem::SymLink(SymLink {
                 name: name.to_string(),
                 target: target.to_string(),
-                parent: Rc::downgrade(&node),
+                parent: Arc::downgrade(&node),
             });
 
-            let new_node = Rc::new(RefCell::new(new_link));
-            node.borrow_mut().add(new_node.clone());
+            let new_node = Arc::new(Mutex::new(new_link));
+            node.lock().unwrap().add(new_node.clone());
             Ok(())
         } else {
             return Err(format!("Directory {} not found", path));
@@ -375,7 +374,7 @@ impl FileSystem {
                 fs::rename(&real_path, &new_path).map_err(|e| e.to_string())?;
             }
 
-            n.borrow_mut().set_name(new_name);
+            n.lock().unwrap().set_name(new_name);
             Ok(())
         } else {
             Err(format!("Item {} not found", path))
@@ -387,7 +386,7 @@ impl FileSystem {
         if let Some(n) = node {
             
             if self.side_effects {
-                match n.borrow().deref() {
+                match n.lock().unwrap().deref() {
                     FSItem::File(_) => {
                         let real_path = self.make_real_path(n.clone());
                         fs::remove_file(&real_path).map_err(|e| e.to_string())?;
@@ -404,8 +403,8 @@ impl FileSystem {
             
             }
 
-            if let Some(parent) = n.borrow().parent().upgrade() {
-                parent.borrow_mut().remove(&n.borrow().name());
+            if let Some(parent) = n.lock().unwrap().parent().upgrade() {
+                parent.lock().unwrap().remove(&n.lock().unwrap().name());
             }
             Ok(())
         } else {
@@ -444,17 +443,17 @@ mod tests {
     #[test]
     fn create_basic_file_system() {
         let fs = FileSystem::new();
-        assert_eq!(fs.root.borrow().name(), "");
+        assert_eq!(fs.root.lock().unwrap().name(), "");
     }
 
     #[test]
     fn create_directory() {
         let mut fs = FileSystem::new();
         fs.make_dir("/", "home").unwrap();
-        let root = fs.root.borrow();
+        let root = fs.root.lock().unwrap();
         if let Some(children) = root.get_children() {
             assert_eq!(children.len(), 1);
-            assert_eq!(children[0].borrow().name(), "home");
+            assert_eq!(children[0].lock().unwrap().name(), "home");
         } else {
             panic!("Root should have children");
         }

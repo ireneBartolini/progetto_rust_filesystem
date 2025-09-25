@@ -1,17 +1,22 @@
 use server::FileSystem;
+use std::sync::{Arc, Mutex};
 use std::path::Path as StdPath;
 use axum::{
     routing::{get, put, post, delete},
-    Router, extract::Path, response::IntoResponse, Json,
+    Router, extract::Path, extract::State, response::IntoResponse, Json,
 };
 use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
+    // The access to the FileSystem is handled through a Mutex, in order to avoid concurrent accesses
+    let fs = Arc::new(Mutex::new(FileSystem::new()));
+
     let app = Router::new()
         .route("/list/*path", get(list_dir))
         .route("/files/*path", get(read_file).put(write_file).delete(delete_file))
-        .route("/mkdir/*path", post(mkdir));
+        .route("/mkdir/*path", post(mkdir))
+        .with_state(fs.clone()); // The state is passed to the handlers;
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     println!("Server listening on {}", addr);
@@ -45,7 +50,10 @@ async fn delete_file(Path(path): Path<String>) -> impl IntoResponse {
     "ok"
 }
 
-async fn mkdir(Path(path): Path<String>) -> impl IntoResponse {
+async fn mkdir(
+    State(fs): State<Arc<Mutex<FileSystem>>>,
+    Path(path): Path<String>
+) -> impl IntoResponse {
     // Crea la directory
 
     let mut fs =  FileSystem::new();
