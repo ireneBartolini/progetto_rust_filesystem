@@ -42,7 +42,7 @@ DELETE /files/<path> – Delete file or directory
 curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt
 
 ## write file content
-curl -X PUT http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt      -H "Content-Type: text/plain"      -d "ciao mondo"
+curl -X PUT http://127.0.0.1:8080/files/nuova_dir/dir_0/../ludo.txt      -H "Content-Type: text/plain"      -d "Ludo entra in cucina\n cade una madonna\nfine"
 
 ## make dir 
 curl -X POST http://127.0.0.1:8080/mkdir/nuova_dir

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::ops::Deref;
 use std::path::PathBuf;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 
 use walkdir::WalkDir;
 
@@ -452,9 +452,10 @@ impl FileSystem {
         self.side_effects = side_effects;
     }
 
-    pub fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
+    pub fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
         let node = self.find(path);
         if let Some(n) = node {
+            
             let lock = n.lock().unwrap();
             match &*lock {
                 FSItem::File(_) => {
@@ -462,16 +463,52 @@ impl FileSystem {
                         drop(lock);
                         let real_path = self.make_real_path(n.clone());
                         fs::write(&real_path, content).map_err(|e| e.to_string())?;
+                        /*let mut file = OpenOptions::new()
+                                                    .create(true)
+                                                    .append(true)
+                                                    .open(&real_path)
+                                                    .map_err(|e| e.to_string())?;
+
+                        file.write_all(content.as_bytes()).map_err(|e| e.to_string())?;*/
                     }
                     Ok(())
                 },
                 _ => Err(format!("{} is not a file", path)),
             }
         } else {
-            Err(format!("File {} not found", path))
-        }
-    }
+            //file not found, create it
+            let path_buf = PathBuf::from(path);
+            let path_parent=path_buf.parent().unwrap().to_str().unwrap();
+            let file_name= path_buf.file_name().unwrap().to_str().unwrap();
+            
+            let parent= self.find(path_parent);
+            if let Some(p)=parent{
+                let lock= p.lock().unwrap();
+                match lock.deref(){
+                    FSItem::Directory(_) => {
+                        drop(lock);
 
+                        self.make_file(path_parent, file_name)?;
+
+                        let real_path_parent= self.make_real_path(p.clone());
+                        let real_path= PathBuf::from(&real_path_parent).join(file_name);
+
+                        fs::write(real_path, content).map_err(|e| e.to_string())?;
+                    },
+                    _ => return Err(format!("{} is not a directory", path_parent)),
+                    //COSA DEVE FARE SE è UN SymLink?
+                    
+                }   
+                
+            }else{
+                return Err(format!("Directory {} not found", path_parent));
+            }
+            Ok(())
+                
+        }
+           
+    }
+    
     pub fn read_file (&self, path: &str) -> Result<String, String> {
         let node = self.find(path);
         if let Some(n) = node {

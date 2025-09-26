@@ -75,9 +75,6 @@ async fn write_file(
     Path(path): Path<String>, 
     body: String,
 ) -> impl IntoResponse {
-    // Scrivi il file con il contenuto ricevuto 
-    println!("Writing in file: {}", body.to_string());
-    //DA TESTARE COME PASSARE IL CONTENUTO 
     let mut fs = fs.lock().unwrap();
     let result=fs.write_file(path.as_str(), &body);
     match result{
