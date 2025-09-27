@@ -42,6 +42,8 @@ async fn list_dir(
     // Acquire the lock on the file system
     let mut fs = fs.lock().unwrap();
 
+    fs.change_dir("/").ok(); // return back to the root beafore performing any operation
+
     // go to the directory
     let res = fs.change_dir(&format!("/{}", path));
 
@@ -60,6 +62,9 @@ async fn read_file(
 ) -> impl IntoResponse {
     // Leggi il file e restituisci i dati
     let mut fs = fs.lock().unwrap();
+
+    fs.change_dir("/").ok(); // return back to the root beafore performing any other call
+
     let result=fs.read_file(path.as_str());
     match result{
         Ok(content) => content.into_response(),
@@ -76,6 +81,9 @@ async fn write_file(
     body: String,
 ) -> impl IntoResponse {
     let mut fs = fs.lock().unwrap();
+
+    fs.change_dir("/").ok(); // return back to the root beafore performing any other call
+
     let result=fs.write_file(path.as_str(), &body);
     match result{
         Ok(_) => "File written successfully".into_response(),
@@ -92,6 +100,8 @@ async fn delete_file(
 ) -> impl IntoResponse {
     // Cancella file o directory
     let mut fs = fs.lock().unwrap();
+
+    fs.change_dir("/").ok(); // return back to the root beafore performing any other call
     
     let result=fs.delete(path.as_str());
 
@@ -111,6 +121,8 @@ async fn mkdir(
     // Crea la directory
 
     let mut fs = fs.lock().unwrap();
+
+    fs.change_dir("/").ok(); // return back to the root beafore performing any other call
 
     let path = StdPath::new(&path);
     

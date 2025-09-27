@@ -14,6 +14,7 @@ async fn cleanup() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_list_dir_api() {
     // setup
     setup().await;
@@ -37,6 +38,7 @@ async fn test_list_dir_api() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_mkdir_api() {
     setup().await;
 
@@ -64,9 +66,6 @@ async fn test_mkdir_api() {
     
     // assert on the body of the response
     assert!(body.contains(&"new_dir".to_string()));
-
-
-
 
     cleanup().await;
 }
