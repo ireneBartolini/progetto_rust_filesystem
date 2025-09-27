@@ -303,30 +303,46 @@ impl FileSystem {
     }
 
     pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String> {
-        if let Some(node) = self.find(path) {
+        // Find the parent directory
+        let node = self.find(path).ok_or_else(|| format!("Directory {} not found", path))?;
 
-            if self.side_effects {
-                // create the directory on the file system
-                let real_path = self.make_real_path(node.clone());
-                let target = PathBuf::from(&real_path)
-                    .join(name);
-                // if it fails for some reason just return an error with "?"
-                fs::create_dir(&target).map_err(|e| e.to_string())?;
+        // Check that it is a directory and that no child with the same name already exists
+        {
+            let lock = node.lock().unwrap();
+            match &*lock {
+                FSItem::Directory(d) => {
+                    if d.children.iter().any(|child| child.lock().unwrap().name() == name) {
+                        return Err(format!("Directory or file {} already exists in {}", name, path));
+                    }
+                }
+                _ => return Err(format!("Invalid request, {} is not a directory", path)),
             }
-
-            let new_dir = FSItem::Directory(Directory {
-                name: name.to_string(),
-                parent: Arc::downgrade(&node),
-                children: vec![],
-            });
-            
-            let new_node = Arc::new(Mutex::new(new_dir));
-            node.lock().unwrap().add(new_node.clone());
-            
-            Ok(())
-        } else {
-            return Err(format!("Directory {} not found", path));
         }
+
+        // After checking everything is okay we can perform the modifications on the filesystem
+        if self.side_effects {
+            let real_path = self.make_real_path(node.clone());
+            let target = PathBuf::from(&real_path).join(name);
+            fs::create_dir(&target).map_err(|e| e.to_string())?;
+        }
+
+        // Creeate the new directory
+        let new_dir = FSItem::Directory(Directory {
+            name: name.to_string(),
+            parent: Arc::downgrade(&node),
+            children: vec![],
+        });
+        let new_node = Arc::new(Mutex::new(new_dir));
+
+        // Add the new node ad child
+        {
+            let mut lock = node.lock().unwrap();
+            if let FSItem::Directory(d) = &mut *lock {
+                d.children.push(new_node);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn make_file(&mut self, path: &str, name: &str) -> Result<(), String> {
@@ -473,7 +489,7 @@ impl FileSystem {
                     }
                     Ok(())
                 },
-                _ => Err(format!("{} is not a file", path)),
+                _ => Err(format!("Invalid request, {} is not a file", path)),
             }
         } else {
             //file not found, create it
@@ -495,7 +511,7 @@ impl FileSystem {
 
                         fs::write(real_path, content).map_err(|e| e.to_string())?;
                     },
-                    _ => return Err(format!("{} is not a directory", path_parent)),
+                    _ => return Err(format!("Invalid request, {} is not a directory", path_parent)),
                     //COSA DEVE FARE SE è UN SymLink?
                     
                 }   
@@ -524,7 +540,7 @@ impl FileSystem {
                         Ok(String::new()) // if side effects are disabled, return empty content
                     }
                 },
-                _ => Err(format!("{} is not a file", path)),
+                _ => Err(format!("Invalid request, {} is not a file", path)),
             }
         } else {
             Err(format!("File {} not found", path))

@@ -39,6 +39,55 @@ async fn test_list_dir_api() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn test_list_dir_not_found_api() {
+    // setup
+    setup().await;
+
+    // after the server is listening to 127.0.0.1:8080
+    let client = reqwest::Client::new();
+    let res = client
+        .get("http://127.0.0.1:8080/list/test_dir/non_existant")
+        .send()
+        .await
+        .unwrap();
+
+    // Check that the status is 404 not found
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Check the body of the response
+    let body = res.text().await.unwrap();
+    assert!(body.contains("not found"));
+
+    // cleanup
+    cleanup().await
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_file_contents() {
+    // setup
+    setup().await;
+
+    // after the server is listening to 127.0.0.1:8080
+    let client = reqwest::Client::new();
+    let res = client
+        .get("http://127.0.0.1:8080/files/test_dir/file1.txt")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+    let body: String = res.text().await.unwrap();
+    
+    // assert on the body of the response
+    assert!(body.contains(&"content".to_string()));
+
+    // cleanup
+    cleanup().await
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn test_mkdir_api() {
     setup().await;
 

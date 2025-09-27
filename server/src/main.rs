@@ -49,11 +49,19 @@ async fn list_dir(
 
     match res{
         Ok(_) => Json(fs.list_contents()).into_response(),
-        Err(e) => (
+        Err(e) if e.contains("not found") => (
             StatusCode::NOT_FOUND,
-            Json(vec![e]),
+            e,
         ).into_response(),
-    }
+        Err(e) if e.contains("Permission denied") => (
+            StatusCode::FORBIDDEN,
+            e,
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            e,
+        ).into_response(),
+        }
 }
 
 async fn read_file(
@@ -68,8 +76,20 @@ async fn read_file(
     let result=fs.read_file(path.as_str());
     match result{
         Ok(content) => content.into_response(),
-        Err(e) => (
+        Err(e) if e.contains("not found") => (
             StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Invalid") => (
+            StatusCode::BAD_REQUEST,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Permission denied") => (
+            StatusCode::FORBIDDEN,
+            e,
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             e,
         ).into_response(),
     }
@@ -87,8 +107,20 @@ async fn write_file(
     let result=fs.write_file(path.as_str(), &body);
     match result{
         Ok(_) => "File written successfully".into_response(),
-        Err(e) => (
+        Err(e) if e.contains("not found") => (
             StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Invalid") => (
+            StatusCode::BAD_REQUEST,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Permission denied") => (
+            StatusCode::FORBIDDEN,
+            e,
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             e,
         ).into_response(),
     }
@@ -107,8 +139,16 @@ async fn delete_file(
 
     match result{
         Ok(_) => "Directory/File deleted successfully".into_response(),
-        Err(e) => (
+        Err(e) if e.contains("not found") => (
             StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Permission denied") => (
+            StatusCode::FORBIDDEN,
+            e,
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             e,
         ).into_response(),
     }
@@ -137,8 +177,24 @@ async fn mkdir(
 
     match result{
         Ok(_) => "Directory created successfully".into_response(),
-        Err(e) => (
+        Err(e) if e.contains("not found") => (
             StatusCode::NOT_FOUND,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Invalid") => (
+            StatusCode::BAD_REQUEST,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("already exists") => (
+            StatusCode::CONFLICT,
+            e,
+        ).into_response(),
+        Err(e) if e.contains("Permission denied") => (
+            StatusCode::FORBIDDEN,
+            e,
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             e,
         ).into_response(),
     }
