@@ -2,7 +2,7 @@ use server::FileSystem;
 use std::sync::{Arc, Mutex};
 use std::path::Path as StdPath;
 use axum::{
-    routing::{get, put, post, delete},
+    routing::{get, post},
     Router, extract::Path, extract::State, response::IntoResponse, Json,
     http::StatusCode,
 };

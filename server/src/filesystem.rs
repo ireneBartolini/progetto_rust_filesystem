@@ -16,7 +16,6 @@ pub enum FSItem {
 }
 
 impl FSItem {
-    
     // These methods allow us to use an FSItem in a uniform way
     // regardless of its actual type.
     pub fn name(&self) -> &str {
@@ -179,7 +178,7 @@ impl FileSystem {
         
         let lock= node.lock().unwrap();
         let mut abs_path=lock.abs_path();
-        let name= (lock.name()).clone();
+        let name= lock.name();
 
         while abs_path.starts_with("/") {
             abs_path = abs_path[1..].to_string();
@@ -449,7 +448,7 @@ impl FileSystem {
             }
 
             let lock  = n.lock().unwrap();
-            let name= (lock.name()).clone().to_string();
+            let name= (lock.name()).to_string();
             let par= lock.parent();
             if let Some(parent) = par.upgrade(){
                 
