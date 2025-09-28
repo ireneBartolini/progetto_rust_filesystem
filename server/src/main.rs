@@ -134,6 +134,8 @@ async fn delete_file(
     let mut fs = fs.lock().unwrap();
 
     fs.change_dir("/").ok(); // return back to the root beafore performing any other call
+
+    println!("{}", path);
     
     let result=fs.delete(path.as_str());
 

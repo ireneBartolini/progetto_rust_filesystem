@@ -127,6 +127,24 @@ async fn test_list_dir_not_found_api() {
     cleanup().await
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn test_list_dir_outside_root() {
+    setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to list a directory outside the root
+    let res = client
+        .get("http://127.0.0.1:8080/list/../../etc")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+
+    cleanup().await;
+}
+
 // TESTS ON
 // GET /files/<path> – Read file contents
 
@@ -287,6 +305,24 @@ async fn test_file_contents_directory_does_not_exist() {
 
     // cleanup
     cleanup().await
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_read_file_outside_root() {
+    setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to read a file outside the root
+    let res = client
+        .get("http://127.0.0.1:8080/files/../../etc/passwd")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+
+    cleanup().await;
 }
 
 #[tokio::test]
@@ -554,6 +590,25 @@ async fn test_write_file_not_found() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn test_write_file_outside_root() {
+    setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to write a file outside the root
+    let res = client
+        .put("http://127.0.0.1:8080/files/../../outside.txt")
+        .body("should not be created")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+
+    cleanup().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn test_write_file_on_directory() {
     setup().await;
 
@@ -712,6 +767,24 @@ async fn test_mkdir_not_found() {
 
     let body = res.text().await.unwrap();
     assert!(body.contains("not found"));
+
+    cleanup().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_mkdir_outside_root() {
+    setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to create a directory outside the root
+    let res = client
+        .post("http://127.0.0.1:8080/mkdir/../../outside_dir")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
 
     cleanup().await;
 }
@@ -1046,6 +1119,24 @@ async fn test_delete_file_not_found() {
 
     let body = res.text().await.unwrap();
     assert!(body.contains("not found"));
+
+    cleanup().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_delete_outside_root() {
+    setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to delete a file outside the root
+    let res = client
+        .delete("http://127.0.0.1:8080/files/../../outside.txt")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
 
     cleanup().await;
 }

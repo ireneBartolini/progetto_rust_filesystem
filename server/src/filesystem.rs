@@ -222,8 +222,11 @@ impl FileSystem {
                 FSItem::Directory(d) => {
                     if part == "." {
                         current.clone()
-                    } else if part == ".." {
-                        d.parent.upgrade().unwrap()
+                    }else if part == ".." {
+                        match d.parent.upgrade() {
+                            Some(parent) => parent,
+                            None => return None, // if it tries to go over the root it returns none
+                        }
                     } else {
 
                         // DEBUG: print current directory contents
