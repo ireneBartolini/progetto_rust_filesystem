@@ -49,3 +49,7 @@ curl -X POST http://127.0.0.1:8080/mkdir/nuova_dir
 
 ## delete 
 curl -X DELETE http://127.0.0.1:8080/files/nuova_dir
+
+## test
+Run on one terminal "cargo run"
+Run on the other terminal "cargo test --test api_test"
