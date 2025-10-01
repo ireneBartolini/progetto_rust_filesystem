@@ -3,7 +3,7 @@ pub mod filesystem_mod{
 use std::sync::{Arc, Mutex, Weak};
 use std::ops::Deref;
 use std::path::PathBuf;
-
+use std::path::Path;
 use std::fs::{self, OpenOptions};
 
 use walkdir::WalkDir;
@@ -162,8 +162,13 @@ impl FileSystem {
         
         let wdir = WalkDir::new(base_path);
         for entry in wdir.into_iter()
-            .filter(|e| e.is_ok())
-            .map(|e| e.unwrap())  {
+                            .filter(|e| e.is_ok())
+                            .map(|e| e.unwrap()) {
+            let entry_path = entry.path();
+                if entry_path == Path::new(base_path) {
+                    // salta il root
+                    continue;
+                }
             
             // full fs path
             let _entry_path = entry.path().to_str().unwrap();
@@ -178,6 +183,7 @@ impl FileSystem {
             } else {
                 "/".to_string()  
             };
+            println!("head: {}", head);
             let name = entry_path.file_name().unwrap().to_str().unwrap();
             
             if entry_path.is_dir() {
