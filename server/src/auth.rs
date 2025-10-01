@@ -127,6 +127,15 @@ impl AuthService {
             fs::create_dir_all(&user_dir)
                 .map_err(|e| format!("Failed to create user directory: {}", e))?;
             println!("Created directory for user: {}", username);
+        } else {
+            // ✅ SOLUZIONE 3: Controlla e rimuovi directory annidate problematiche
+            let nested_dir = format!("{}/{}", user_dir, username);
+            if std::path::Path::new(&nested_dir).exists() {
+                println!("⚠️ Found problematic nested directory {}, removing it", nested_dir);
+                fs::remove_dir_all(&nested_dir)
+                    .map_err(|e| format!("Failed to remove nested directory: {}", e))?;
+                println!("✅ Removed nested directory successfully");
+            }
         }
         
         Ok(())

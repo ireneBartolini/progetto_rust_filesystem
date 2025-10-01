@@ -29,6 +29,8 @@ async fn main() {
         .route("/auth/login", post(login))
         
         // Route del filesystem (protette)
+        .route("/list", get(list_dir_with_empty_path))    // Handler che passa path vuoto
+        .route("/list/", get(list_dir_with_empty_path))
         .route("/list/*path", get(list_dir))
         .route("/files/*path", get(read_file).put(write_file).delete(delete_file))
         .route("/mkdir/*path", post(mkdir))
@@ -70,12 +72,25 @@ async fn register(
 }
 
 // FUNCTION TO EXCTRACT A USER
-fn extract_user_from_headers(headers: &HeaderMap) -> Result<String, String> {
+fn extract_user_from_headers(headers: &HeaderMap, auth_service: &AuthService) -> Result<String, String> {
     let auth_header = headers
         .get("Authorization")
         .and_then(|h| h.to_str().ok());
     
-    auth::AuthService::extract_user_from_header(auth_header)
+    println!("Auth header: {:?}", auth_header);
+    
+    let header = auth_header.ok_or("Missing Authorization header")?;
+    
+    if !header.starts_with("Bearer ") {
+        return Err("Invalid Authorization header format".to_string());
+    }
+
+    let token = &header[7..]; // Rimuove "Bearer "
+    println!("Token: {}", token);
+    
+    let result = auth_service.validate_token(token);
+    println!("Token validation result: {:?}", result);
+    result
 }
 
 async fn login(
@@ -88,33 +103,78 @@ async fn login(
     }
 }
 
-// Handlers (da implementare)
+// handlers
+async fn list_dir_with_empty_path(
+    state: State<Arc<AuthService>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    list_dir(state, Path("".to_string()), headers).await
+}
+
 async fn list_dir(
-    State(_): State<Arc<AuthService>>,
+    State(auth_service): State<Arc<AuthService>>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Read the directory and return the list of files/directories in JSON
+    println!("=== LIST_DIR CALLED === Path: '{}'", path);
 
-    // verify that the user is authenticated
-    let username = match extract_user_from_headers(&headers) {
-        Ok(user) => user,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    let username = match extract_user_from_headers(&headers, &auth_service) {
+        Ok(user) => {
+            println!("Authenticated user: {}", user);
+            user
+        },
+        Err(e) => {
+            println!("Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
     };
 
-    // create the local filesystem
+    // ✅ AGGIUNGI: Debug del filesystem reale
+    let user_path = format!("remote-fs/{}", username);
+    println!("🔍 Creating filesystem from path: {}", user_path);
+    
+    if let Ok(entries) = std::fs::read_dir(&user_path) {
+        println!("📁 Real directory contents:");
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let file_name = entry.file_name();
+                let file_type = if entry.path().is_dir() { "DIR" } else { "FILE" };
+                println!("  - {} ({})", file_name.to_str().unwrap(), file_type);
+            }
+        }
+    }
+
     let mut fs = match create_user_filesystem(&username) {
         Ok(fs) => fs,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    fs.change_dir("/").ok(); // return back to the root before performing any operation
+    fs.change_dir("/").ok();
+    
+    // ✅ AGGIUNGI: Debug dello stato iniziale del filesystem virtuale
+    println!("🖥️ Virtual filesystem root contents (before navigation): {:?}", fs.list_contents());
 
-    // go to the directory
-    let res = fs.change_dir(&format!("/{}", path));
+    let target_path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", path)
+    };
+    
+    println!("🎯 Target path: '{}'", target_path);
+    
+    let res = if target_path == "/" {
+        // Per la root, non facciamo change_dir aggiuntivi
+        Ok(())
+    } else {
+        fs.change_dir(&target_path)
+    };
 
-    match res{
-        Ok(_) => Json(fs.list_contents()).into_response(),
+    match res {
+        Ok(_) => {
+            let contents = fs.list_contents();
+            println!("✅ Final virtual filesystem contents: {:?}", contents);
+            Json(contents).into_response()
+        },
         Err(e) if e.contains("not found") => (
             StatusCode::NOT_FOUND,
             e,
@@ -127,18 +187,24 @@ async fn list_dir(
             StatusCode::INTERNAL_SERVER_ERROR,
             e,
         ).into_response(),
-        }
+    }
 }
 
 async fn read_file(
-    State(_): State<Arc<AuthService>>,
+    State(auth_service): State<Arc<AuthService>>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // verify that the user is authenticated
-    let username = match extract_user_from_headers(&headers) {
-        Ok(user) => user,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    let username = match extract_user_from_headers(&headers, &auth_service) { // ← Passa auth_service
+        Ok(user) => {
+            println!("Authenticated user: {}", user);
+            user
+        },
+        Err(e) => {
+            println!("Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
     };
 
     let mut fs = match create_user_filesystem(&username) {
@@ -171,15 +237,21 @@ async fn read_file(
 }
 
 async fn write_file(
-    State(_): State<Arc<AuthService>>,
+    State(auth_service): State<Arc<AuthService>>,
     Path(path): Path<String>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
 
-    let username = match extract_user_from_headers(&headers) {
-        Ok(user) => user,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    let username = match extract_user_from_headers(&headers, &auth_service) { // ← Passa auth_service
+        Ok(user) => {
+            println!("Authenticated user: {}", user);
+            user
+        },
+        Err(e) => {
+            println!("Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
     };
 
     let mut fs = match create_user_filesystem(&username) {
@@ -212,14 +284,20 @@ async fn write_file(
 }
 
 async fn delete_file(
-    State(_): State<Arc<AuthService>>,
+    State(auth_service): State<Arc<AuthService>>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
 
-    let username = match extract_user_from_headers(&headers) {
-        Ok(user) => user,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    let username = match extract_user_from_headers(&headers, &auth_service) { // ← Passa auth_service
+        Ok(user) => {
+            println!("Authenticated user: {}", user);
+            user
+        },
+        Err(e) => {
+            println!("Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
     };
 
     let mut fs = match create_user_filesystem(&username) {
@@ -251,15 +329,21 @@ async fn delete_file(
 }
 
 async fn mkdir(
-    State(_): State<Arc<AuthService>>,
+    State(auth_service): State<Arc<AuthService>>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Crea la directory
 
-    let username = match extract_user_from_headers(&headers) {
-        Ok(user) => user,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    let username = match extract_user_from_headers(&headers, &auth_service) { // ← Passa auth_service
+        Ok(user) => {
+            println!("Authenticated user: {}", user);
+            user
+        },
+        Err(e) => {
+            println!("Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
     };
 
     let mut fs = match create_user_filesystem(&username) {

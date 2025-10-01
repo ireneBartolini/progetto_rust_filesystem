@@ -49,10 +49,12 @@ curl -X PUT http://127.0.0.1:8080/files/alice_secret.txt \
   -d "This is Alice's private file!"
 
 ## make dir 
-curl -X POST http://127.0.0.1:8080/mkdir/nuova_dir
+curl -X POST http://127.0.0.1:8080/mkdir/alice_documents \
+  -H "Authorization: Bearer ALICE_TOKEN_HERE"
 
 ## delete 
-curl -X DELETE http://127.0.0.1:8080/files/nuova_dir
+curl -X DELETE http://127.0.0.1:8080/files/alice_diary.txt \
+  -H "Authorization: Bearer ALICE_TOKEN_HERE"
 
 ## register user
 curl -X POST http://127.0.0.1:8080/auth/register \
@@ -65,5 +67,6 @@ curl -X POST http://127.0.0.1:8080/auth/login \
   -d '{"username": "alice", "password": "password123"}'
 
 ## test
+Per ora non funzionano perché non contengono l'autenticazione
 Run on one terminal "cargo run"
 Run on the other terminal "cargo test --test api_test"
