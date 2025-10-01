@@ -37,18 +37,32 @@ DELETE /files/<path> – Delete file or directory
 # CHIAMATE API
 
 ## List directory contents
+curl -X GET http://127.0.0.1:8080/list/ \
+  -H "Authorization: Bearer ALICE_TOKEN_HERE"
 
 ## read file content 
 curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt
 
 ## write file content
-curl -X PUT http://127.0.0.1:8080/files/nuova_dir/dir_0/../ludo.txt      -H "Content-Type: text/plain"      -d "Ludo entra in cucina\n cade una madonna\nfine"
+curl -X PUT http://127.0.0.1:8080/files/alice_secret.txt \
+  -H "Authorization: Bearer ALICE_TOKEN_HERE" \
+  -d "This is Alice's private file!"
 
 ## make dir 
 curl -X POST http://127.0.0.1:8080/mkdir/nuova_dir
 
 ## delete 
 curl -X DELETE http://127.0.0.1:8080/files/nuova_dir
+
+## register user
+curl -X POST http://127.0.0.1:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "password123"}'
+
+## login user
+curl -X POST http://127.0.0.1:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "password123"}'
 
 ## test
 Run on one terminal "cargo run"

@@ -1,25 +1,40 @@
 use server::FileSystem;
+mod auth;
+use auth::{AuthService, LoginRequest, RegisterRequest, AuthResponse};
+
 use std::sync::{Arc, Mutex};
 use std::path::Path as StdPath;
 use axum::{
-    routing::{get, post},
-    Router, extract::Path, extract::State, response::IntoResponse, Json,
-    http::StatusCode,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Json},
+    routing::{get, post, put, delete},
+    Router,
 };
 use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
+    // creation of the auth service
+    let auth_service = Arc::new(AuthService::new());
+
     // The access to the FileSystem is handled through a Mutex, in order to avoid concurrent accesses
-    let fs = Arc::new(Mutex::new(FileSystem::from_file_system("remote-fs")));
-    fs.lock().unwrap().set_side_effects(true);
+    // let fs = Arc::new(Mutex::new(FileSystem::from_file_system("remote-fs")));
+    // fs.lock().unwrap().set_side_effects(true);
 
 
-    let app = Router::new()
+     let app = Router::new()
+        // Route di autenticazione (pubbliche)
+        .route("/auth/register", post(register))
+        .route("/auth/login", post(login))
+        
+        // Route del filesystem (protette)
         .route("/list/*path", get(list_dir))
         .route("/files/*path", get(read_file).put(write_file).delete(delete_file))
         .route("/mkdir/*path", post(mkdir))
-        .with_state(fs.clone()); // The state is passed to the handlers;
+        
+        // Stato condiviso
+        .with_state(auth_service); // The state is passed to the handlers;
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     println!("Server listening on {}", addr);
@@ -32,17 +47,68 @@ async fn main() {
     .unwrap();
 }
 
+// function to create the file system
+fn create_user_filesystem(username: &str) -> Result<FileSystem, String> {
+    let user_path = format!("remote-fs/{}", username);
+    let mut fs = FileSystem::from_file_system(&user_path);
+    fs.set_side_effects(true);
+    Ok(fs)
+}
+
+async fn register(
+    State(auth_service): State<Arc<AuthService>>,
+    Json(req): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    match auth_service.register(req) {
+        Ok(message) => {
+            // Salva utenti su file
+            let _ = auth_service.save_to_file("users.json");
+            (StatusCode::CREATED, message).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+// FUNCTION TO EXCTRACT A USER
+fn extract_user_from_headers(headers: &HeaderMap) -> Result<String, String> {
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok());
+    
+    auth::AuthService::extract_user_from_header(auth_header)
+}
+
+async fn login(
+    State(auth_service): State<Arc<AuthService>>,
+    Json(req): Json<LoginRequest>,
+) -> impl IntoResponse {
+    match auth_service.login(req) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (StatusCode::UNAUTHORIZED, e).into_response(),
+    }
+}
+
 // Handlers (da implementare)
 async fn list_dir(
-    State(fs): State<Arc<Mutex<FileSystem>>>,
-    Path(path): Path<String>
+    State(_): State<Arc<AuthService>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     // Read the directory and return the list of files/directories in JSON
 
-    // Acquire the lock on the file system
-    let mut fs = fs.lock().unwrap();
+    // verify that the user is authenticated
+    let username = match extract_user_from_headers(&headers) {
+        Ok(user) => user,
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
 
-    fs.change_dir("/").ok(); // return back to the root beafore performing any operation
+    // create the local filesystem
+    let mut fs = match create_user_filesystem(&username) {
+        Ok(fs) => fs,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    fs.change_dir("/").ok(); // return back to the root before performing any operation
 
     // go to the directory
     let res = fs.change_dir(&format!("/{}", path));
@@ -65,11 +131,20 @@ async fn list_dir(
 }
 
 async fn read_file(
-    State(fs): State<Arc<Mutex<FileSystem>>>,
-    Path(path): Path<String>
+    State(_): State<Arc<AuthService>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Leggi il file e restituisci i dati
-    let mut fs = fs.lock().unwrap();
+    // verify that the user is authenticated
+    let username = match extract_user_from_headers(&headers) {
+        Ok(user) => user,
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
+
+    let mut fs = match create_user_filesystem(&username) {
+        Ok(fs) => fs,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
     fs.change_dir("/").ok(); // return back to the root beafore performing any other call
 
@@ -96,11 +171,21 @@ async fn read_file(
 }
 
 async fn write_file(
-    State(fs): State<Arc<Mutex<FileSystem>>>,
-    Path(path): Path<String>, 
+    State(_): State<Arc<AuthService>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    let mut fs = fs.lock().unwrap();
+
+    let username = match extract_user_from_headers(&headers) {
+        Ok(user) => user,
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
+
+    let mut fs = match create_user_filesystem(&username) {
+        Ok(fs) => fs,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
     fs.change_dir("/").ok(); // return back to the root beafore performing any other call
 
@@ -127,11 +212,20 @@ async fn write_file(
 }
 
 async fn delete_file(
-    State(fs): State<Arc<Mutex<FileSystem>>>,
-    Path(path): Path<String>
+    State(_): State<Arc<AuthService>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Cancella file o directory
-    let mut fs = fs.lock().unwrap();
+
+    let username = match extract_user_from_headers(&headers) {
+        Ok(user) => user,
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
+
+    let mut fs = match create_user_filesystem(&username) {
+        Ok(fs) => fs,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
     fs.change_dir("/").ok(); // return back to the root beafore performing any other call
 
@@ -157,12 +251,21 @@ async fn delete_file(
 }
 
 async fn mkdir(
-    State(fs): State<Arc<Mutex<FileSystem>>>,
-    Path(path): Path<String>
+    State(_): State<Arc<AuthService>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     // Crea la directory
 
-    let mut fs = fs.lock().unwrap();
+    let username = match extract_user_from_headers(&headers) {
+        Ok(user) => user,
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
+
+    let mut fs = match create_user_filesystem(&username) {
+        Ok(fs) => fs,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
     fs.change_dir("/").ok(); // return back to the root beafore performing any other call
 

@@ -93,22 +93,43 @@ type FSItemCell = Mutex<FSItem>;
 type FSNode = Arc<FSItemCell>;
 type FSNodeWeak = Weak<FSItemCell>;
 
+pub struct Permission {
+    user: [char; 3],
+    group: [char; 3],
+    others: [char; 3],
+}
+
 pub struct File {
     name: String,
     size: usize,
     parent: FSNodeWeak,
+    /*
+    permissions: Permission,
+    owner: String,
+    created_at: String,
+    */
 }
 
 pub struct Directory {
     name: String,
     parent: FSNodeWeak,
     children: Vec<FSNode>,
+    /*
+    permissions: Permission,
+    owner: String,
+    created_at: String,
+    */
 }
 
 pub struct SymLink {
     name: String,
     target: String,
     parent: FSNodeWeak,
+    /*
+    permissions: Permission,
+    owner: String,
+    created_at: String,
+    */
 }
 
 pub struct FileSystem {
