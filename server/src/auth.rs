@@ -55,8 +55,13 @@ pub struct AuthService {
 
 impl AuthService {
     pub fn new() -> Self {
+        let u= AuthService::load_from_file("users.json");
+        let users_map= match u {
+            Ok(usr) => usr,
+            Err(e) => HashMap::new(),       
+        };
         Self {
-            users: Arc::new(Mutex::new(HashMap::new())),
+            users: Arc::new(Mutex::new(users_map)),
         }
     }
 
@@ -91,6 +96,7 @@ impl AuthService {
 
     // Login utente
     pub fn login(&self, req: LoginRequest) -> Result<AuthResponse, String> {
+
         let users = self.users.lock().unwrap();
         
         // Trova l'utente
@@ -200,14 +206,15 @@ impl AuthService {
     }
 
     // Carica utenti da file
-    pub fn load_from_file(&self, path: &str) -> Result<(), String> {
+    pub fn load_from_file( path: &str) -> Result<HashMap<String, User> , String> {
         if let Ok(json) = std::fs::read_to_string(path) {
             let loaded_users: HashMap<String, User> = serde_json::from_str(&json)
                 .map_err(|e| e.to_string())?;
-            
-            let mut users = self.users.lock().unwrap();
-            *users = loaded_users;
+            Ok(loaded_users)
         }
-        Ok(())
+        else {
+            Err("No existing user file found, starting fresh".to_string())
+        }
+        
     }
 }

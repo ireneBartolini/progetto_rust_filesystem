@@ -51,8 +51,7 @@ curl -X PUT http://127.0.0.1:8080/files/alice_secret.txt \
 ## make dir 
 curl -X POST http://127.0.0.1:8080/mkdir/alice_documents \
   -H "Authorization: Bearer ALICE_TOKEN_HERE"
-  eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6MTc1OTMzMTMwMiwiaWF0IjoxNzU5MzI3NzAyfQ.6x-JVopwi4h62E7pJerxqIHb5qcWlMmZdlONrGlIxkY
-
+  
 ## delete 
 curl -X DELETE http://127.0.0.1:8080/files/alice_diary.txt \
   -H "Authorization: Bearer ALICE_TOKEN_HERE"

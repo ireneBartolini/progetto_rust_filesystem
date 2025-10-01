@@ -183,7 +183,7 @@ impl FileSystem {
             } else {
                 "/".to_string()  
             };
-            println!("head: {}", head);
+           
             let name = entry_path.file_name().unwrap().to_str().unwrap();
             
             if entry_path.is_dir() {
