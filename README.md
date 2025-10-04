@@ -74,11 +74,6 @@ Run on the other terminal "cargo test --test api_test"
 
 
 ## note
-Ho pensato a come gestire i permessi e secondo me creare il fs per ogni utente a partire dalla sua cartella è un problema, perché non può accedere ai file condivisi con lui se l'owner è un altro utente. Overro in unix si fa isolamento con i permessi, quindi se alice prova a fare remote-fs/bob/ vede solo i file di cui ha il permesso in lettura. Mentre ora come ora non potrebbe perché la cartella di bob è fuori. Nel caso non avesse proprio i permessi per accedere dovrebbe ricevere un UNAUTHORIZED.
-Quindi ho pensato che dovremmo ritornare all'implementazione di prima, fare un database coi metadati e ogni volta che un utente prova a fare qualcosa si fa prima una query per vedere se ha i permessi.
-
-Ho pensato a queste tabelle:
-
 FILE:
 | File_ID* | Path                      | User_ID | User_Permissions | Group_Permissions | Others_Permissions | Size (bytes) | Created_At           | Last_modified         |
 |----------|---------------------------|---------|------------------|-------------------|--------------------|--------------|----------------------|----------------------|
