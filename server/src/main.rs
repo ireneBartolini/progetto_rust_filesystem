@@ -2,6 +2,8 @@ use server::FileSystem;
 mod auth;
 use auth::{AuthService, LoginRequest, RegisterRequest};
 
+use rusqlite::{params, Connection, Result as SqlResult};
+
 use std::sync::{Arc, Mutex};
 use std::path::Path as StdPath;
 use axum::{
@@ -17,10 +19,14 @@ use std::net::SocketAddr;
 struct AppState {
     auth_service: Arc<AuthService>,
     filesystem: Arc<Mutex<Option<FileSystem>>>, // condiviso e clonabile
+    connectin: Arc< Mutex<Connection>>,
 }
 
 #[tokio::main]
-async fn main() {
+async fn main()-> SqlResult<()> {
+    // Crea (o apre) un database chiamato "mio_database.db"
+    let conn = Connection::open("database/db.db")?;
+
     // creation of the auth service
     let auth_service = Arc::new(AuthService::new());
     let fs = Arc::new(Mutex::new(None));
@@ -28,6 +34,7 @@ async fn main() {
     let state = AppState {
         auth_service,
         filesystem: fs,
+        connectin: Arc::new(Mutex::new(conn)),
     };
 
     let app = Router::new()
@@ -54,6 +61,7 @@ async fn main() {
     )
     .await
     .unwrap();
+    Ok(())
 }
 
 // function to create the file system
