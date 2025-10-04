@@ -4,6 +4,7 @@ use bcrypt::{hash, verify, DEFAULT_COST};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use chrono::{Duration, Utc};
+use rusqlite::{Connection, StatementStatus, params, Result as SQLResult};
 
 // Struttura per i claims del JWT
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,7 +19,6 @@ pub struct Claims {
 pub struct User {
     pub username: String,
     pub password_hash: String,
-    pub created_at: String,
 }
 
 // Richiesta di login
@@ -51,17 +51,16 @@ const JWT_SECRET: &str = "malnati-e-bello";
 
 pub struct AuthService {
     users: UserDB,
+    conn: Arc<Mutex<Connection>>
 }
 
 impl AuthService {
-    pub fn new() -> Self {
-        let u= AuthService::load_from_file("users.json");
-        let users_map= match u {
-            Ok(usr) => usr,
-            Err(e) => HashMap::new(),       
-        };
+    pub fn new( conn: Arc<Mutex<Connection>>) -> Self {
+        let u = AuthService::load_from_db(conn.clone());
+        let users_map = u.unwrap_or_default();
         Self {
             users: Arc::new(Mutex::new(users_map)),
+            conn: conn.clone()
         }
     }
 
@@ -87,10 +86,13 @@ impl AuthService {
         let user = User {
             username: req.username.clone(),
             password_hash,
-            created_at: Utc::now().to_rfc3339(),
         };
 
-        users.insert(req.username.clone(), user);
+        
+
+        users.insert(req.username.clone(), user.clone());
+        //lo aggiunge nel db 
+        let _=self.save_to_db(user);
         Ok("User registered successfully".to_string())
     }
 
@@ -132,15 +134,15 @@ impl AuthService {
         if !std::path::Path::new(&user_dir).exists() {
             fs::create_dir_all(&user_dir)
                 .map_err(|e| format!("Failed to create user directory: {}", e))?;
-            println!("Created directory for user: {}", username);
+            //println!("Created directory for user: {}", username);
         } else {
-            // ✅ SOLUZIONE 3: Controlla e rimuovi directory annidate problematiche
+            // Controlla e rimuovi directory annidate problematiche
             let nested_dir = format!("{}/{}", user_dir, username);
             if std::path::Path::new(&nested_dir).exists() {
-                println!("⚠️ Found problematic nested directory {}, removing it", nested_dir);
+                println!("Found problematic nested directory {}, removing it", nested_dir);
                 fs::remove_dir_all(&nested_dir)
                     .map_err(|e| format!("Failed to remove nested directory: {}", e))?;
-                println!("✅ Removed nested directory successfully");
+                println!("Removed nested directory successfully");
             }
         }
         
@@ -180,41 +182,60 @@ impl AuthService {
         Ok(token_data.claims.sub)
     }
 
-    // Estrae username dall'header Authorization
-    pub fn extract_user_from_header(auth_header: Option<&str>) -> Result<String, String> {
-        let header = auth_header.ok_or("Missing Authorization header")?;
+   // Estrae username dall'header Authorization
+    // pub fn extract_user_from_header(&self, auth_header: Option<&str>) -> Result<String, String> {
+    //     let header = auth_header.ok_or("Missing Authorization header")?;
         
-        if !header.starts_with("Bearer ") {
-            return Err("Invalid Authorization header format".to_string());
-        }
+    //     if !header.starts_with("Bearer ") {
+    //         return Err("Invalid Authorization header format".to_string());
+    //     }
 
-        let token = &header[7..]; // Rimuove "Bearer "
+    //     let token = &header[7..]; // Rimuove "Bearer "
         
-        // Per ora, usiamo un'istanza temporanea per validare
-        // In produzione, dovresti passare il service come parametro
-        let service = AuthService::new();
-        service.validate_token(token)
-    }
+    //     // Per ora, usiamo un'istanza temporanea per validare
+    //     self.validate_token(token)
+    // }
 
     // Salva utenti su file (persistenza semplice)
-    pub fn save_to_file(&self, path: &str) -> Result<(), String> {
-        let users = self.users.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*users)
-            .map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())?;
+    pub fn save_to_db(&self, user: User) -> SQLResult<()> {
+        let conn= self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO USER (Username, Password) VALUES (?1, ?2) ", 
+            params![user.username, user.password_hash],
+        )?;
         Ok(())
+
     }
 
     // Carica utenti da file
-    pub fn load_from_file( path: &str) -> Result<HashMap<String, User> , String> {
-        if let Ok(json) = std::fs::read_to_string(path) {
-            let loaded_users: HashMap<String, User> = serde_json::from_str(&json)
-                .map_err(|e| e.to_string())?;
-            Ok(loaded_users)
+    pub fn load_from_db( conn: Arc<Mutex<Connection>>) -> Result<HashMap<String, User> , String> {
+       
+       // Leggi i dati
+    let c= conn.lock().unwrap();
+    let mut stmt = c.prepare("SELECT username, password FROM user");
+    match stmt {
+        Ok(mut statement) => {
+            let mut user_map = HashMap::new();
+            let user_iter = statement.query_map([], |row| {
+                let username: String = row.get(0)?;
+                let password_hash: String = row.get(1)?;
+                Ok(User {
+                    username,
+                    password_hash,
+                })
+            }).map_err(|e| e.to_string())?;
+
+            for user_result in user_iter {
+                let user = user_result.map_err(|e| e.to_string())?;
+                user_map.insert(user.username.clone(), user);
+            }
+            Ok(user_map)
+        },
+        Err(_) => {
+            Err("Non esiste una tabella USER".to_string())
         }
-        else {
-            Err("No existing user file found, starting fresh".to_string())
-        }
+    }
+
         
     }
 }

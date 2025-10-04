@@ -66,6 +66,15 @@ curl -X POST http://127.0.0.1:8080/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username": "alice", "password": "password123"}'
 
+
+  ### PER WINDOWS 
+  Invoke-WebRequest `
+>>   -Uri "http://127.0.0.1:8080/auth/register" `
+>>   -Method POST `
+>>   -Headers @{ "Content-Type" = "application/json" } `
+>>   -Body '{"username": "alice", "password": "password123"}'
+
+
 ## test
 Per ora non funzionano perché non contengono l'autenticazione
 Run on one terminal "cargo run"

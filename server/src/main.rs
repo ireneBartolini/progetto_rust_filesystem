@@ -19,22 +19,22 @@ use std::net::SocketAddr;
 struct AppState {
     auth_service: Arc<AuthService>,
     filesystem: Arc<Mutex<Option<FileSystem>>>, // condiviso e clonabile
-    connectin: Arc< Mutex<Connection>>,
+    connection: Arc< Mutex<Connection>>,
 }
 
 #[tokio::main]
 async fn main()-> SqlResult<()> {
     // Crea (o apre) un database chiamato "mio_database.db"
-    let conn = Connection::open("database/db.db")?;
+    let connection  = Arc::new(Mutex::new(Connection::open("database/db.db")?));
 
     // creation of the auth service
-    let auth_service = Arc::new(AuthService::new());
+    let auth_service = Arc::new(AuthService::new( connection.clone()  ));
     let fs = Arc::new(Mutex::new(None));
 
     let state = AppState {
         auth_service,
         filesystem: fs,
-        connectin: Arc::new(Mutex::new(conn)),
+        connection,
     };
 
     let app = Router::new()
@@ -79,7 +79,6 @@ async fn register(
     let auth_service = &app_state.auth_service;
     match auth_service.register(req) {
         Ok(message) => {
-            let _ = auth_service.save_to_file("users.json");
             (StatusCode::CREATED, message).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
