@@ -4,7 +4,7 @@ use bcrypt::{hash, verify, DEFAULT_COST};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use chrono::{Duration, Utc};
-use rusqlite::{Connection, StatementStatus, params, Result as SQLResult};
+use rusqlite::{Connection,  params, Result as SQLResult};
 
 // Struttura per i claims del JWT
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ pub struct AuthResponse {
     pub expires_in: usize,
 }
 
-// Database utenti (semplice, in memoria)
+// Database utenti 
 pub type UserDB = Arc<Mutex<HashMap<String, User>>>;
 
 // Chiave segreta per firmare i JWT (in produzione usare variabile ambiente)
@@ -182,21 +182,7 @@ impl AuthService {
         Ok(token_data.claims.sub)
     }
 
-   // Estrae username dall'header Authorization
-    // pub fn extract_user_from_header(&self, auth_header: Option<&str>) -> Result<String, String> {
-    //     let header = auth_header.ok_or("Missing Authorization header")?;
-        
-    //     if !header.starts_with("Bearer ") {
-    //         return Err("Invalid Authorization header format".to_string());
-    //     }
-
-    //     let token = &header[7..]; // Rimuove "Bearer "
-        
-    //     // Per ora, usiamo un'istanza temporanea per validare
-    //     self.validate_token(token)
-    // }
-
-    // Salva utenti su file (persistenza semplice)
+    // Salva utenti su DB 
     pub fn save_to_db(&self, user: User) -> SQLResult<()> {
         let conn= self.conn.lock().unwrap();
         conn.execute(
@@ -212,7 +198,7 @@ impl AuthService {
        
        // Leggi i dati
     let c= conn.lock().unwrap();
-    let mut stmt = c.prepare("SELECT username, password FROM user");
+    let stmt = c.prepare("SELECT username, password FROM user");
     match stmt {
         Ok(mut statement) => {
             let mut user_map = HashMap::new();
@@ -234,8 +220,7 @@ impl AuthService {
         Err(_) => {
             Err("Non esiste una tabella USER".to_string())
         }
-    }
-
-        
+        }
+    
     }
 }
