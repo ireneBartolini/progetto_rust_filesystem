@@ -70,3 +70,31 @@ curl -X POST http://127.0.0.1:8080/auth/login \
 Per ora non funzionano perché non contengono l'autenticazione
 Run on one terminal "cargo run"
 Run on the other terminal "cargo test --test api_test"
+
+
+
+## note
+Ho pensato a come gestire i permessi e secondo me creare il fs per ogni utente a partire dalla sua cartella è un problema, perché non può accedere ai file condivisi con lui se l'owner è un altro utente. Overro in unix si fa isolamento con i permessi, quindi se alice prova a fare remote-fs/bob/ vede solo i file di cui ha il permesso in lettura. Mentre ora come ora non potrebbe perché la cartella di bob è fuori. Nel caso non avesse proprio i permessi per accedere dovrebbe ricevere un UNAUTHORIZED.
+Quindi ho pensato che dovremmo ritornare all'implementazione di prima, fare un database coi metadati e ogni volta che un utente prova a fare qualcosa si fa prima una query per vedere se ha i permessi.
+
+Ho pensato a queste tabelle:
+
+FILE:
+| File_ID* | Name              | User_ID | Group_ID | User_Permissions | Group_Permissions | Others_Permissions |
+|----------|-------------------|---------|----------|------------------|-------------------|--------------------|
+| 1        | alice_secret.txt  | 1       | 10       | rw-              | r--               | ---                |
+| 2        | shared_notes.txt  | 1       | 20       | rw-              | rw-               | r--                |
+| 3        | bob_diary.txt     | 2       | 10       | rw-              | r--               | ---                |
+| 4        | public_info.txt   | 2       | 30       | rw-              | rw-               | r--                |
+
+USER:
+| User_ID* | Group_ID* |
+|----------|-----------|
+| 1        | 10        |  <!-- alice -->
+| 2        | 10        |  <!-- bob -->
+| 3        | 20        |  <!-- charlie -->
+| 4        | 30        |  <!-- dave -->
+
+- Alice per accedere ai suoi file usa alice/alice_secret.txt.
+- Alice per accedre ai file di Bob usa bob/bob_diary.txt e può farlo perché ha il permesso in lettura essendo dello stesso gruppo.
+- Charlie se prova a fare alice/alice_secret.txt riceve 403 UNAUTHORIZED perché non ha i permessi essendo di un gruppo diverso.
