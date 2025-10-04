@@ -73,7 +73,15 @@ curl -X POST http://127.0.0.1:8080/auth/login \
 >>   -Method POST `
 >>   -Headers @{ "Content-Type" = "application/json" } `
 >>   -Body '{"username": "alice", "password": "password123"}'
+## write file
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8080/files/alice_secret.txt" `
+  -Method PUT `
+  -Headers @{ "Authorization" = "Bearer ALICE_TOKEN_HERE" } `
+  -Body "This is Alice's private file!"
 
+
+  
 
 ## test
 Per ora non funzionano perché non contengono l'autenticazione
