@@ -80,21 +80,20 @@ Quindi ho pensato che dovremmo ritornare all'implementazione di prima, fare un d
 Ho pensato a queste tabelle:
 
 FILE:
-| File_ID* | Name              | User_ID | Group_ID | User_Permissions | Group_Permissions | Others_Permissions |
-|----------|-------------------|---------|----------|------------------|-------------------|--------------------|
-| 1        | alice_secret.txt  | 1       | 10       | rw-              | r--               | ---                |
-| 2        | shared_notes.txt  | 1       | 20       | rw-              | rw-               | r--                |
-| 3        | bob_diary.txt     | 2       | 10       | rw-              | r--               | ---                |
-| 4        | public_info.txt   | 2       | 30       | rw-              | rw-               | r--                |
+| File_ID* | Path                      | User_ID | User_Permissions | Group_Permissions | Others_Permissions | Size (bytes) | Created_At           | Last_modified         |
+|----------|---------------------------|---------|------------------|-------------------|--------------------|--------------|----------------------|----------------------|
+| 1        | alice/alice_secret.txt    | 1       | rw-              | r--               | ---                | 1024         | 2024-05-01 10:00:00  | 2024-06-01 09:00:00  |
+| 2        | bob/bob_diary.txt         | 2       | rw-              | r--               | ---                | 2048         | 2024-05-02 11:00:00  | 2024-06-02 08:30:00  |
+| 3        | shared/group_notes.txt    | 1       | rw-              | rw-               | r--                | 4096         | 2024-05-03 12:00:00  | 2024-06-03 07:45:00  |
+| 4        | charlie/charlie_todo.txt  | 3       | rw-              | r--               | ---                | 512          | 2024-05-04 13:00:00  | 2024-06-04 07:00:00  |
+| 5        | public/readme.txt         | 4       | rw-              | rw-               | r--                | 256          | 2024-05-05 14:00:00  | 2024-06-05 06:30:00  |
 
 USER:
-| User_ID* | Group_ID* |
-|----------|-----------|
-| 1        | 10        |  <!-- alice -->
-| 2        | 10        |  <!-- bob -->
-| 3        | 20        |  <!-- charlie -->
-| 4        | 30        |  <!-- dave -->
+| User_ID* | Username | Password                          |
+|----------|----------|-----------------------------------|
+| 1        | alice    | $2b$12$abcdehashedalicepassword   |
+| 2        | bob      | $2b$12$xyz12hashedbobpassword     |
+| 3        | charlie  | $2b$12$mnopqhashedcharliepassword |
+| 4        | dave     | $2b$12$rstuvhasheddavepassword    |
 
-- Alice per accedere ai suoi file usa alice/alice_secret.txt.
-- Alice per accedre ai file di Bob usa bob/bob_diary.txt e può farlo perché ha il permesso in lettura essendo dello stesso gruppo.
-- Charlie se prova a fare alice/alice_secret.txt riceve 403 UNAUTHORIZED perché non ha i permessi essendo di un gruppo diverso.
+> Le password sono hashate.
