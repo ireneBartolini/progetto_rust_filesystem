@@ -11,7 +11,8 @@
 # Build output (tutte le cartelle target)
 target/
 **/target/
-
+server/target
+server/target/debug
 # File temporanei di Cargo
 **/*.rs.bk
 
@@ -25,4 +26,6 @@ tests/tmp/
 # Blocca file lock solo se non vuoi versionarlo (opzionale)
 # Cargo.lock
 **/remote-fs
-**/database
+server/database
+**/db.db
+server/database/db.db
