@@ -25,4 +25,5 @@ tests/tmp/
 # Blocca file lock solo se non vuoi versionarlo (opzionale)
 # Cargo.lock
 **/remote-fs
-**/database
+server/database
+**/db.db

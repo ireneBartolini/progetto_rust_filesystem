@@ -1,54 +1,104 @@
-use fuser::{Filesystem, FileAttr, FileType, ReplyAttr, ReplyData, ReplyDirectory, Request};
-use libc::ENOENT;
-use std::ffi::OsStr;
-use std::time::{Duration, SystemTime};
-use tokio::runtime::Runtime;
 
-mod remote;
+use serde::{Deserialize, Serialize};
+use std::io::{self, Write};
+use rpassword::read_password;
 
-struct RemoteFs {
-    base_url: String,
-    rt: Runtime, // Tokio runtime per usare async in un contesto sync (FUSE)
+#[derive(Serialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
 }
 
-impl Filesystem for RemoteFs {
-    fn readdir(&mut self, _req: &Request, _ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        if offset == 0 {
-            let entries = self.rt.block_on(remote::list_dir(&self.base_url, "/"));
-            match entries {
-                Ok(list) => {
-                    let mut offset = 1;
-                    for entry in list {
-                        reply.add(entry.ino, offset, entry.kind, entry.name);
-                        offset += 1;
-                    }
-                    reply.ok();
-                }
-                Err(_) => reply.error(ENOENT),
-            }
-        } else {
-            reply.ok();
+#[derive(Deserialize, Debug)]
+struct LoginResponse {
+    token: String,
+}
+
+
+
+use reqwest::Client;
+use tokio;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    
+    println!("== Remote FS ==");
+
+    //login or registration
+    let mut account= false;
+    while !account{
+        print!("Do you already have an account? (y/n)");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim().to_uppercase().to_string();
+        if  answer=="Y".to_string(){
+                account=true;
+        }else if answer=="N".to_string(){
+                //Registratrion 
+                println!("Register:");
+                    // Input username
+                print!("Username: ");
+                io::stdout().flush()?;
+                let mut username = String::new();
+                io::stdin().read_line(&mut username)?;
+                let username = username.trim().to_string();
+
+                // Input password (nascosta)
+                print!("Password: ");
+                io::stdout().flush()?;
+                let password = read_password().unwrap();
+
+                let client = Client::new();
+                let res = client.post("http://127.0.0.1:8080/auth/register")
+                            .json(&LoginRequest { username, password })
+                            .send()
+                            .await?;
+                        
+                let status= res.status();       
+                if status.is_success() {
+                    println!("✅ Correctly registered");
+                    account = true;
+                } else {
+                    let text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                    println!("❌ Registration failed: HTTP {} - {}", status, text);
+                }  
+                
         }
+        
     }
+        
 
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, reply: ReplyData) {
-        let path = format!("/{}", ino); // mapping esempio
-        let data = self.rt.block_on(remote::read_file(&self.base_url, &path));
-        match data {
-            Ok(content) => {
-                let slice = &content[offset as usize..(offset as usize + size as usize).min(content.len())];
-                reply.data(slice);
-            }
-            Err(_) => reply.error(ENOENT),
-        }
-    }
+    // Input username
+    print!("Username: ");
+    io::stdout().flush()?;
+    let mut username = String::new();
+    io::stdin().read_line(&mut username)?;
+    let username = username.trim().to_string();
+
+    // Input password (nascosta)
+    print!("Password: ");
+    io::stdout().flush()?;
+    let password = read_password().unwrap();
+
+    let client = Client::new();
+    let res = client.post("http://127.0.0.1:8080/auth/login")
+        .json(&LoginRequest { username, password })
+        .send()
+        .await?;
+        
+    let status= res.status();       
+    if status.is_success() {
+        println!("✅ Success Login");
+        let body= res.json();
+        let login_res: LoginResponse = body.await?;
+        println!("token: {}", login_res.token);
+    } else {
+        let text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        println!("❌ Login failed: HTTP {} - {}", status, text);
+        }  
+        
+        Ok(())
+   
 }
 
-fn main() {
-    let mountpoint = std::env::args().nth(1).expect("missing mountpoint");
-    let fs = RemoteFs {
-        base_url: "http://127.0.0.1:8080".into(),
-        rt: Runtime::new().unwrap(),
-    };
-    fuser::mount2(fs, mountpoint, &[]).unwrap();
-}
