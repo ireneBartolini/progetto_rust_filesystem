@@ -114,3 +114,35 @@ USER:
 | 4        | dave     | $2b$12$rstuvhasheddavepassword    |
 
 > Le password sono hashate.
+
+
+
+
+#### CLIENT
+
+- list
+
+ls 
+1. getattr <- info su directory corrente
+2. readdir 
+3. lookup <- su ogni entry restituita per mostrre gli attributi
+
+ls {subdir}
+1. lookup <- deve risolvere subdir 
+2. getattr <- controlla se esiste e che tipo di file 
+3. readdir 
+4. lookup risultato <- per ogni entry
+
+cat file.txt
+
+1.	lookup(parent=1, name="file.txt")	Risolvi il file.
+2.	getattr(ino=file_ino)	Ottieni attributi.
+3.	open(ino=file_ino)	Apre il file.
+4.	read(ino=file_ino, offset, size)	Legge i dati (una o più volte).
+5.	release(ino=file_ino)	Chiude il file.
+
+echo ".." > file.txt
+1. lookup	<- controlla se il file è già noto	chiama /exists?path=pino.txt o restituisci ENOENT
+create	crea solo inode fittizio	non fare nulla sul server
+2. write	<- invia direttamente PUT /files con path e data	il server creerà o aggiornerà il file
+3. getattr	restituisci attributi 
