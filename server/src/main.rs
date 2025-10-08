@@ -65,10 +65,11 @@ async fn main()-> SqlResult<()> {
 }
 
 // function to create the file system
-fn create_user_filesystem(username: &str) -> Result<FileSystem, String> {
+fn create_user_filesystem(username: &str, connection: Arc<Mutex<Connection>>) -> Result<FileSystem, String> {
     let user_path = format!("remote-fs/{}", username);
     let mut fs = FileSystem::from_file_system(&user_path);
     fs.set_side_effects(true);
+    fs.set_database(connection);
     Ok(fs)
 }
 
@@ -86,7 +87,7 @@ async fn register(
 }
 
 // FUNCTION TO EXTRACT A USER
-fn extract_user_from_headers(headers: &HeaderMap, auth_service: &AuthService) -> Result<String, String> {
+fn extract_user_from_headers(headers: &HeaderMap, auth_service: &AuthService) -> Result<(String, i32), String> {
     let auth_header = headers
         .get("Authorization")
         .and_then(|h| h.to_str().ok());
@@ -97,8 +98,8 @@ fn extract_user_from_headers(headers: &HeaderMap, auth_service: &AuthService) ->
         return Err("Invalid Authorization header format".to_string());
     }
 
-    let token = &header[7..]; // Rimuove "Bearer "
-    auth_service.validate_token(token)
+    let token = &header[7..]; 
+    auth_service.validate_token(token)  // returns (username, user_id)
 }
 
 async fn login(
@@ -108,7 +109,7 @@ async fn login(
     let auth_service = &app_state.auth_service;
     match auth_service.login(req) {
         Ok(response) => {
-            if let Ok(new_fs) = create_user_filesystem(&response.username) {
+            if let Ok(new_fs) = create_user_filesystem(&response.username, app_state.connection) {
                 // Aggiorna il filesystem nell'AppState
                 let mut fs = app_state.filesystem.lock().unwrap();
                 *fs = Some(new_fs);
@@ -132,10 +133,17 @@ async fn list_dir(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth_service = &app_state.auth_service;
-    let username = match extract_user_from_headers(&headers, &auth_service) {
-        Ok(user) => user,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    println!("=== LIST_DIR CALLED === Path: '{}'", path);
+
+    let username = match extract_user_from_headers(&headers, &app_state.auth_service) {
+        Ok(user) => {
+            println!("Authenticated user: {}", user.0);
+            user
+        },
+        Err(e) => {
+            println!("Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
     };
 
     let mut guard = app_state.filesystem.lock().unwrap();
@@ -144,23 +152,27 @@ async fn list_dir(
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
+    // TODO: Ottieni user_id reale dal database
+    let user_id = 1; // Hardcoded per ora
+
     let target_path = if path.is_empty() {
         "/".to_string()
     } else {
         format!("/{}", path)
     };
 
-    let res = if target_path == "/" {
-        Ok(())
-    } else {
-        fs.change_dir(&target_path)
-    };
+    println!("🎯 Target path: '{}'", target_path);
 
-    match res {
-        Ok(_) => Json(fs.list_contents()).into_response(),
-        Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
-        Err(e) if e.contains("Permission denied") => (StatusCode::FORBIDDEN, e).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    // Usa il nuovo metodo che restituisce FileInfo
+    match fs.list_contents_with_metadata(&target_path, user_id) {
+        Ok(files_info) => {
+            println!("📋 Found {} accessible files", files_info.len());
+            Json(files_info).into_response()
+        },
+        Err(e) => {
+            println!("❌ Error listing directory: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        },
     }
 }
 
@@ -201,14 +213,26 @@ async fn write_file(
         return (StatusCode::UNAUTHORIZED, e).into_response();
     }
 
+    let (username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
+        Ok((user, id)) => {
+            println!("✅ Authenticated user: {} (id: {})", user, id);
+            (user, id)
+        },
+        Err(e) => {
+            println!("❌ Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
+    };
+
     let mut guard = app_state.filesystem.lock().unwrap();
     let fs = match guard.as_mut() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
+    // TODO cahnge user_id
     fs.change_dir("/").ok();
-    match fs.write_file(&path, &body) {
+    match fs.write_file(&path, &body, user_id as i64, "600") {
         Ok(_) => "File written successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),

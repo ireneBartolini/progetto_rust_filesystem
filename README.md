@@ -84,7 +84,6 @@ Invoke-RestMethod `
   
 
 ## test
-Per ora non funzionano perché non contengono l'autenticazione
 Run on one terminal "cargo run"
 Run on the other terminal "cargo test --test api_test"
 

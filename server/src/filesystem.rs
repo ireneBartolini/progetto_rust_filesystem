@@ -5,8 +5,10 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::path::Path;
 use std::fs::{self, OpenOptions};
-
 use walkdir::WalkDir;
+use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 
 
 pub enum FSItem {
@@ -99,44 +101,108 @@ pub struct Permission {
     others: [char; 3],
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMetadata {
+    pub file_id: Option<i64>,
+    pub path: String,
+    pub user_id: i64,
+    pub user_permissions: u32,     // 0-7 (rwx)
+    pub group_permissions: u32,    // 0-7 (rwx)
+    pub others_permissions: u32,   // 0-7 (rwx)
+    pub size: i64,
+    pub created_at: String,
+    pub last_modified: String,
+}
+
+impl FileMetadata {
+    pub fn new(path: &str, user_id: i64, permissions: u32, is_directory: bool) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        let user_perms = (permissions >> 6) & 0o7;
+        let group_perms = (permissions >> 3) & 0o7;
+        let others_perms = permissions & 0o7;
+        
+        Self {
+            file_id: None,
+            path: path.to_string(),
+            user_id,
+            user_permissions: user_perms,
+            group_permissions: group_perms,
+            others_permissions: others_perms,
+            size: 0,
+            created_at: now.clone(),
+            last_modified: now,
+        }
+    }
+    
+    pub fn get_octal_permissions(&self) -> u32 {
+        (self.user_permissions << 6) + (self.group_permissions << 3) + self.others_permissions
+    }
+
+    pub fn update_modified_time(&mut self) {
+            self.last_modified = chrono::Utc::now().to_rfc3339();
+        }
+}
+
+// struct used to represent the informations of a file (the ones you want to see when you write ls -l)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub permissions: String,        // es: "drwxr-xr-x", "-rw-r--r--"
+    pub links: u32,                 // always 1
+    pub owner: String,              // owner username
+    pub group: String,              // group (always users)
+    pub size: i64,                  // dimension in bytes
+    pub modified: String,           // last modifiied date
+    pub name: String,               // name of the file/directory
+    pub is_directory: bool,         // flag to identify wether it is a directory or not
+}
+
+impl FileInfo {
+    pub fn new(
+        permissions: String,
+        owner: String,
+        size: i64,
+        modified: String,
+        name: String,
+        is_directory: bool,
+    ) -> Self {
+        Self {
+            permissions,
+            links: 1,  // always 1
+            owner,
+            group: "users".to_string(),  // always the same group "users"
+            size,
+            modified,
+            name,
+            is_directory,
+        }
+    }
+}
+
 pub struct File {
     name: String,
     size: usize,
     parent: FSNodeWeak,
-    /*
-    permissions: Permission,
-    owner: String,
-    created_at: String,
-    */
 }
 
 pub struct Directory {
     name: String,
     parent: FSNodeWeak,
     children: Vec<FSNode>,
-    /*
-    permissions: Permission,
-    owner: String,
-    created_at: String,
-    */
 }
 
 pub struct SymLink {
     name: String,
     target: String,
     parent: FSNodeWeak,
-    /*
-    permissions: Permission,
-    owner: String,
-    created_at: String,
-    */
 }
 
 pub struct FileSystem {
     real_path: String,  // the real path of the file system
     root: FSNode,
     current: FSNode,
-    side_effects: bool  // enable / disable side effects on the file system
+    side_effects: bool,  // enable / disable side effects on the file system
+    db_connection: Option<Arc<Mutex<Connection>>>,
 }
 
 impl FileSystem {
@@ -152,8 +218,191 @@ impl FileSystem {
             root: root.clone(),
             current: root,
             side_effects: false,
+            db_connection: None,
         }
     }
+
+    // method to set the connection to the database
+    pub fn set_database(&mut self, connection: Arc<Mutex<Connection>>) {
+        self.db_connection = Some(connection);
+    }
+
+    // Save the metadata in the database
+    fn save_file_metadata(&self, metadata: &FileMetadata) -> Result<i64, String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            conn.execute(
+                "INSERT INTO METADATA (path, user_id, user_permissions, group_permissions, others_permissions, size, created_at, last_modified)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    metadata.path,
+                    metadata.user_id,
+                    metadata.user_permissions,
+                    metadata.group_permissions,
+                    metadata.others_permissions,
+                    metadata.size,
+                    metadata.created_at,
+                    metadata.last_modified
+                ],
+            ).map_err(|e| e.to_string())?;
+            
+            Ok(conn.last_insert_rowid())
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
+    // Aggiorna SOLO last_modified (per operazioni che non cambiano dimensione)
+    fn update_file_modified_time(&self, path: &str) -> Result<(), String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            
+            conn.execute(
+                "UPDATE METADATA SET last_modified = ?1 WHERE path = ?2",
+                params![now, path],
+            ).map_err(|e| e.to_string())?;
+            
+            Ok(())
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
+    // UPDATE completo per dimensione + last_modified (per write_file)
+    fn update_file_size_and_modified(&self, path: &str, size: i64) -> Result<(), String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            
+            conn.execute(
+                "UPDATE METADATA SET size = ?1, last_modified = ?2 WHERE path = ?3",
+                params![size, now, path],
+            ).map_err(|e| e.to_string())?;
+            
+            Ok(())
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
+    //  UPDATE solo permessi (per chmod operations)
+    fn update_file_permissions(&self, path: &str, permissions: u32) -> Result<(), String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            
+            let user_perms = (permissions >> 6) & 0o7;
+            let group_perms = (permissions >> 3) & 0o7;
+            let others_perms = permissions & 0o7;
+            
+            conn.execute(
+                "UPDATE METADATA SET user_permissions = ?1, group_permissions = ?2, others_permissions = ?3, last_modified = ?4 WHERE path = ?5",
+                params![user_perms, group_perms, others_perms, now, path],
+            ).map_err(|e| e.to_string())?;
+            
+            Ok(())
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
+    // DELETE metadati (per delete operations)
+    fn delete_file_metadata(&self, path: &str) -> Result<(), String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            conn.execute(
+                "DELETE FROM METADATA WHERE path = ?1",
+                params![path],
+            ).map_err(|e| e.to_string())?;
+            
+            Ok(())
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
+    // Retrieve the file metadata
+    fn get_file_metadata(&self, path: &str) -> Result<Option<FileMetadata>, String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT file_id, path, user_id, user_permissions, group_permissions, others_permissions, size, created_at, last_modified
+                 FROM METADATA WHERE path = ?1"
+            ).map_err(|e| e.to_string())?;
+            
+            let result = stmt.query_row(params![path], |row| {
+                Ok(FileMetadata {
+                    file_id: Some(row.get(0)?),
+                    path: row.get(1)?,
+                    user_id: row.get(2)?,
+                    user_permissions: row.get(3)?,
+                    group_permissions: row.get(4)?,
+                    others_permissions: row.get(5)?,
+                    size: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_modified: row.get(8)?
+                })
+            }).optional().map_err(|e| e.to_string())?;
+            
+            Ok(result)
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
+    // function to format permissions in the unix style
+    fn format_permissions(user_perms: u32, group_perms: u32, others_perms: u32, is_directory: bool) -> String {
+        let mut result = String::new();
+        
+        // Primo carattere: tipo di file
+        result.push(if is_directory { 'd' } else { '-' });
+        
+        // Permessi user (owner)
+        result.push(if user_perms & 4 != 0 { 'r' } else { '-' });
+        result.push(if user_perms & 2 != 0 { 'w' } else { '-' });
+        result.push(if user_perms & 1 != 0 { 'x' } else { '-' });
+        
+        // Permessi group
+        result.push(if group_perms & 4 != 0 { 'r' } else { '-' });
+        result.push(if group_perms & 2 != 0 { 'w' } else { '-' });
+        result.push(if group_perms & 1 != 0 { 'x' } else { '-' });
+        
+        // Permessi others
+        result.push(if others_perms & 4 != 0 { 'r' } else { '-' });
+        result.push(if others_perms & 2 != 0 { 'w' } else { '-' });
+        result.push(if others_perms & 1 != 0 { 'x' } else { '-' });
+        
+        result
+    }
+
+    fn format_timestamp(timestamp: &str) -> String {
+        // Parse timestamp RFC3339 e formatta come "Dec  7 14:30"
+        if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+            datetime.format("%b %e %H:%M").to_string()
+        } else {
+            "Jan  1 00:00".to_string()  // Fallback
+        }
+    }
+
+    fn get_username_by_id(&self, user_id: i64) -> Result<String, String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT Username FROM USER WHERE User_ID = ?1")
+                .map_err(|e| e.to_string())?;
+            
+            let username = stmt.query_row(params![user_id], |row| {
+                Ok(row.get::<_, String>(0)?)
+            }).optional().map_err(|e| e.to_string())?;
+            
+            Ok(username.unwrap_or_else(|| format!("user{}", user_id)))
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
 
     pub fn from_file_system(base_path: &str) -> Self {
         
@@ -331,6 +580,133 @@ impl FileSystem {
         }
     }
 
+    pub fn list_contents_with_metadata(&self, dir_path: &str, requesting_user_id: i64) -> Result<Vec<FileInfo>, String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            // Normalizza il path della directory
+            let normalized_dir = if dir_path == "/" || dir_path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", dir_path.trim_start_matches('/').trim_end_matches('/'))
+            };
+            
+            // Query per trovare i file direttamente nella directory
+            let pattern = if normalized_dir == "/" {
+                "/[^/]+".to_string()  // File nella root: /file.txt, /dir1
+            } else {
+                format!("{}/[^/]+", normalized_dir)  // File in directory: /users/alice/file.txt
+            };
+            
+            // ✅ CORREZIONE: Query semplificata senza is_directory
+            let mut stmt = conn.prepare(
+                "SELECT m.path, m.user_id, m.user_permissions, m.group_permissions, m.others_permissions, 
+                        m.size, m.last_modified, u.Username
+                 FROM METADATA m 
+                 LEFT JOIN USER u ON m.user_id = u.User_ID 
+                 WHERE m.path GLOB ?1 AND m.path NOT GLOB ?2 
+                 ORDER BY m.path"
+            ).map_err(|e| e.to_string())?;
+            
+            // Pattern per escludere i file nelle sottodirectory
+            let exclude_pattern = if normalized_dir == "/" {
+                "/*/".to_string()
+            } else {
+                format!("{}/*/*", normalized_dir)
+            };
+            
+            let file_iter = stmt.query_map(params![pattern, exclude_pattern], |row| {
+                let path: String = row.get(0)?;
+                let user_id: i64 = row.get(1)?;
+                let user_perms: u32 = row.get(2)?;
+                let group_perms: u32 = row.get(3)?;
+                let others_perms: u32 = row.get(4)?;
+                let size: i64 = row.get(5)?;
+                let last_modified: String = row.get(6)?;
+                let username: Option<String> = row.get(7)?;
+                
+                Ok((path, user_id, user_perms, group_perms, others_perms, size, last_modified, username))
+            }).map_err(|e| e.to_string())?;
+            
+            let mut file_infos = Vec::new();
+            
+            for file_result in file_iter {
+                let (path, user_id, user_perms, group_perms, others_perms, size, last_modified, username) = 
+                    file_result.map_err(|e| e.to_string())?;
+                
+                // Controlla permessi di lettura
+                let can_read = if user_id == requesting_user_id {
+                    (user_perms & 4) != 0
+                } else {
+                    // TODO: Implementare controllo gruppo
+                    (others_perms & 4) != 0
+                };
+                
+                if can_read {
+                    // Estrai solo il nome del file dal path completo
+                    let file_name = path.split('/').last().unwrap_or("").to_string();
+                    
+                    // ✅ CORREZIONE: Determina se è directory controllando il filesystem virtuale
+                    let is_directory = match self.find(&path) {
+                        Some(node) => {
+                            let lock = node.lock().unwrap();
+                            matches!(*lock, FSItem::Directory(_))
+                        },
+                        None => {
+                            // ✅ FALLBACK: Se non trova nel filesystem virtuale, 
+                            // controlla se esistono file che iniziano con questo path + "/"
+                            if let Some(ref db) = self.db_connection {
+                                let conn = db.lock().unwrap();
+                                let check_pattern = format!("{}/%", path);
+                                let mut check_stmt = match conn.prepare("SELECT 1 FROM METADATA WHERE path GLOB ?1 LIMIT 1") {
+                                                                    Ok(stmt) => stmt,
+                                                                    Err(e) => return Err(e.to_string()),
+                                                                };
+                                let has_children = check_stmt.query_row(params![check_pattern], |_| Ok(true)).optional().unwrap_or(Some(false)).unwrap_or(false);
+                                has_children
+                            } else {
+                                false
+                            }
+                        }
+                    };
+                    
+                    // Formatta i permessi in stile Unix
+                    let permissions = Self::format_permissions(user_perms, group_perms, others_perms, is_directory);
+                    
+                    // Formatta il timestamp
+                    let formatted_time = Self::format_timestamp(&last_modified);
+                    
+                    // Ottieni il nome utente
+                    let owner = username.unwrap_or_else(|| format!("user{}", user_id));
+                    
+                    let file_info = FileInfo::new(
+                        permissions,
+                        owner,
+                        size,
+                        formatted_time,
+                        file_name,
+                        is_directory,
+                    );
+                    
+                    file_infos.push(file_info);
+                }
+            }
+            
+            // ✅ ORDINAMENTO: Directory prima, poi file
+            file_infos.sort_by(|a, b| {
+                match (a.is_directory, b.is_directory) {
+                    (true, false) => std::cmp::Ordering::Less,    // Directory prima
+                    (false, true) => std::cmp::Ordering::Greater, // File dopo
+                    _ => a.name.cmp(&b.name),                     // Stesso tipo -> ordine alfabetico
+                }
+            });
+            
+            Ok(file_infos)
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
     pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String> {
         // Find the parent directory
         let node = self.find(path).ok_or_else(|| format!("Directory {} not found", path))?;
@@ -374,7 +750,8 @@ impl FileSystem {
         Ok(())
     }
 
-    pub fn make_file(&mut self, path: &str, name: &str) -> Result<(), String> {
+    // internal make file method
+    fn make_file_internal(&mut self, path: &str, name: &str) -> Result<(), String> {
         if let Some(node) = self.find(path) {
             
             if self.side_effects {
@@ -398,6 +775,11 @@ impl FileSystem {
         else {
             return Err(format!("Directory {} not found", path));
         }
+    }
+
+    // make file method
+    pub fn make_file(&mut self, path: &str, name: &str) -> Result<(), String> {
+        self.make_file_internal(path, name)
     }
 
     // added for testing
@@ -497,7 +879,15 @@ impl FileSystem {
         self.side_effects = side_effects;
     }
 
-    pub fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
+    pub fn write_file(&mut self, path: &str, content: &str, user_id: i64, permissions: &str) -> Result<(), String> {
+        // NParsing permessi da stringa ottale a numero
+        let permissions_octal = u32::from_str_radix(permissions, 8)
+            .map_err(|_| format!("Invalid permissions format: {}", permissions))?;
+        
+        // Calcolo dimensione del contenuto
+        let content_size = content.len() as i64;
+
+
         let node = self.find(path);
         if let Some(n) = node {
             
@@ -513,8 +903,24 @@ impl FileSystem {
                                                     .append(true)
                                                     .open(&real_path)
                                                     .map_err(|e| e.to_string())?;
-
                         file.write_all(content.as_bytes()).map_err(|e| e.to_string())?;*/
+
+                        println!("File already existing");
+
+                        if let Some(ref db) = self.db_connection {
+                            let conn = db.lock().unwrap();
+                            let now = chrono::Utc::now().to_rfc3339();
+                            
+                            let result = conn.execute(
+                                "UPDATE METADATA SET size = ?1, last_modified = ?2 WHERE path = ?3",
+                                params![content_size, now, path],
+                            );
+                            
+                            if let Err(e) = result {
+                                println!("Warning: Failed to update file metadata: {}", e);
+                                // Non blocco l'operazione se l'update metadati fallisce
+                            }
+                        }
                     }
                     Ok(())
                 },
@@ -534,6 +940,42 @@ impl FileSystem {
                         drop(lock);
 
                         self.make_file(path_parent, file_name)?;
+
+                        if self.side_effects {
+                            let real_path_parent= self.make_real_path(p.clone());
+                            let real_path= PathBuf::from(&real_path_parent).join(file_name);
+                            fs::write(real_path, content).map_err(|e| e.to_string())?;
+                        }
+
+                        if let Some(ref db) = self.db_connection {
+                            let conn = db.lock().unwrap();
+                            let now = chrono::Utc::now().to_rfc3339();
+                            
+                            // NOTE: Decompongo i permessi ottali in user/group/others
+                            let user_perms = (permissions_octal >> 6) & 0o7;
+                            let group_perms = (permissions_octal >> 3) & 0o7;
+                            let others_perms = permissions_octal & 0o7;
+                            
+                            let result = conn.execute(
+                                "INSERT INTO METADATA (path, user_id, user_permissions, group_permissions, others_permissions, size, created_at, last_modified)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                params![
+                                    path,
+                                    user_id,
+                                    user_perms,
+                                    group_perms,
+                                    others_perms,
+                                    content_size,
+                                    now.clone(),
+                                    now
+                                ],
+                            );
+                            
+                            if let Err(e) = result {
+                                println!("Warning: Failed to save file metadata: {}", e);
+                                // NOTE: Non blocco l'operazione se il salvataggio metadati fallisce
+                            }
+                        }
 
                         let real_path_parent= self.make_real_path(p.clone());
                         let real_path= PathBuf::from(&real_path_parent).join(file_name);
@@ -584,6 +1026,8 @@ impl FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+    use std::sync::{Arc, Mutex};
 
     fn create_file_system_with_structure() -> FileSystem {
         let mut fs = FileSystem::new();

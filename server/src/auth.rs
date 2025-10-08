@@ -10,6 +10,7 @@ use rusqlite::{Connection,  params, Result as SQLResult};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,        // username
+    pub user_id: i32,       // user_id
     pub exp: usize,         // expiration time
     pub iat: usize,         // issued at
 }
@@ -19,6 +20,7 @@ pub struct Claims {
 pub struct User {
     pub username: String,
     pub password_hash: String,
+    pub user_id: Option<i32>,
 }
 
 // Richiesta di login
@@ -40,6 +42,7 @@ pub struct RegisterRequest {
 pub struct AuthResponse {
     pub token: String,
     pub username: String,
+    pub user_id: i32,
     pub expires_in: usize,
 }
 
@@ -82,17 +85,21 @@ impl AuthService {
         let password_hash = hash(&req.password, DEFAULT_COST)
             .map_err(|_| "Failed to hash password")?;
 
-        // Crea l'utente
-        let user = User {
+        // Crea l'utente senza ID (sarà generato dal DB)
+        let mut user = User {
             username: req.username.clone(),
             password_hash,
+            user_id: None
         };
 
-        
+        // Salva nel DB e ottieni l'ID generato
+        let user_id = self.save_to_db(user.clone())
+            .map_err(|e| format!("Failed to save user to database: {}", e))?;
 
-        users.insert(req.username.clone(), user.clone());
-        //lo aggiunge nel db 
-        let _=self.save_to_db(user);
+        // Aggiorna l'user in memoria con l'ID corretto
+        user.user_id = Some(user_id);
+        users.insert(req.username.clone(), user);
+
         Ok("User registered successfully".to_string())
     }
 
@@ -116,12 +123,29 @@ impl AuthService {
         // ensure there is a user directory
         self.ensure_user_directory(&req.username)?;
 
-        // Genera JWT token
-        let token = self.generate_token(&req.username)?;
+        let user_id = match user.user_id {
+            Some(id) => id,
+            None => {
+                // Se user_id non è in memoria, cerca nel database
+                let conn = self.conn.lock().unwrap();
+                let mut stmt = conn.prepare("SELECT User_ID FROM USER WHERE Username = ?1")
+                    .map_err(|e| format!("Database error: {}", e))?;
+                
+                let id = stmt.query_row(params![req.username], |row| {
+                    Ok(row.get::<_, i32>(0)?)
+                }).map_err(|_| "User not found in database")?;
+                
+                id
+            }
+        };
+
+        // ✅ GENERA: token con user_id incluso
+        let token = self.generate_token(&req.username, user_id)?;
         
         Ok(AuthResponse {
             token,
             username: req.username,
+            user_id,
             expires_in: 3600, // 1 ora
         })
     }
@@ -150,7 +174,7 @@ impl AuthService {
     }
 
     // Genera JWT token
-    fn generate_token(&self, username: &str) -> Result<String, String> {
+    fn generate_token(&self, username: &str, user_id: i32) -> Result<String, String> {
         let expiration = Utc::now()
             .checked_add_signed(Duration::hours(1))
             .expect("valid timestamp")
@@ -158,6 +182,7 @@ impl AuthService {
 
         let claims = Claims {
             sub: username.to_string(),
+            user_id,  // ✅ INCLUDI user_id nel token
             exp: expiration,
             iat: Utc::now().timestamp() as usize,
         };
@@ -171,7 +196,7 @@ impl AuthService {
     }
 
     // Valida JWT token
-    pub fn validate_token(&self, token: &str) -> Result<String, String> {
+    pub fn validate_token(&self, token: &str) -> Result<(String, i32), String> {
         let token_data = decode::<Claims>(
             token,
             &DecodingKey::from_secret(JWT_SECRET.as_ref()),
@@ -179,48 +204,49 @@ impl AuthService {
         )
         .map_err(|_| "Invalid token".to_string())?;
 
-        Ok(token_data.claims.sub)
+        Ok((token_data.claims.sub, token_data.claims.user_id))
     }
 
     // Salva utenti su DB 
-    pub fn save_to_db(&self, user: User) -> SQLResult<()> {
-        let conn= self.conn.lock().unwrap();
+    pub fn save_to_db(&self, user: User) -> SQLResult<i32> {
+        let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO USER (Username, Password) VALUES (?1, ?2) ", 
+            "INSERT INTO USER (Username, Password) VALUES (?1, ?2)", 
             params![user.username, user.password_hash],
         )?;
-        Ok(())
-
+        
+        let user_id = conn.last_insert_rowid() as i32;
+        Ok(user_id)
     }
 
     // Carica utenti da file
-    pub fn load_from_db( conn: Arc<Mutex<Connection>>) -> Result<HashMap<String, User> , String> {
-       
-       // Leggi i dati
-    let c= conn.lock().unwrap();
-    let stmt = c.prepare("SELECT username, password FROM user");
-    match stmt {
-        Ok(mut statement) => {
-            let mut user_map = HashMap::new();
-            let user_iter = statement.query_map([], |row| {
-                let username: String = row.get(0)?;
-                let password_hash: String = row.get(1)?;
-                Ok(User {
-                    username,
-                    password_hash,
-                })
-            }).map_err(|e| e.to_string())?;
+    pub fn load_from_db(conn: Arc<Mutex<Connection>>) -> Result<HashMap<String, User>, String> {
+        let c = conn.lock().unwrap();
+        // ✅ USA: i nomi corretti delle colonne (Username, Password, User_ID)
+        let stmt = c.prepare("SELECT Username, Password, User_ID FROM USER");
+        match stmt {
+            Ok(mut statement) => {
+                let mut user_map = HashMap::new();
+                let user_iter = statement.query_map([], |row| {
+                    let username: String = row.get(0)?;
+                    let password_hash: String = row.get(1)?;
+                    let user_id: i32 = row.get(2)?;
+                    Ok(User {
+                        username,
+                        password_hash,
+                        user_id: Some(user_id),
+                    })
+                }).map_err(|e| e.to_string())?;
 
-            for user_result in user_iter {
-                let user = user_result.map_err(|e| e.to_string())?;
-                user_map.insert(user.username.clone(), user);
+                for user_result in user_iter {
+                    let user = user_result.map_err(|e| e.to_string())?;
+                    user_map.insert(user.username.clone(), user);
+                }
+                Ok(user_map)
+            },
+            Err(_) => {
+                Err("Non esiste una tabella USER".to_string())
             }
-            Ok(user_map)
-        },
-        Err(_) => {
-            Err("Non esiste una tabella USER".to_string())
         }
-        }
-    
     }
 }
