@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use rpassword::read_password;
 use libc::ENOENT;
 use reqwest::Client;
-
+use std::collections::HashMap;
+use libc::ENOSYS;
 
 #[derive(Serialize)]
 struct LoginRequest {
@@ -26,35 +27,52 @@ struct WriteRequest<'a> {
 struct RemoteFS {
     base_url: String,
     token: String,
+    inode_to_path: HashMap<u64, String>,
+    next_ino: u64,
 }
 
 impl RemoteFS {
     fn new(base_url: String, token: String) -> Self {
+        let mut map = HashMap::new();
+        // La root (ino = 1)
+        map.insert(1, "/".to_string());
         Self {
             base_url,
             token,
+            inode_to_path: map,
+            next_ino: 2,
         }
     }
-
-    fn ino_to_path(&self, ino: u64) -> String {
-        // Semplice mappatura demo: inode -> /file_ino
-        format!("/file_{}", ino)
+    
+    fn register_path(&mut self, path: &str) -> u64 {
+        if let Some((&ino, _)) = self.inode_to_path.iter().find(|(_, p)| p.as_str() == path) {
+            return ino;
+        }
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        self.inode_to_path.insert(ino, path.to_string());
+        ino
     }
+
+    fn get_path(&self, ino: u64) -> Option<&str> {
+        self.inode_to_path.get(&ino).map(|s| s.as_str())
+    }
+    
 }
 
 use tokio::task;
 
-use fuser::{FileAttr, FileType, Filesystem, Request, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyWrite};
+use fuser::{FileAttr, FileType, Filesystem, Request, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyWrite, ReplyEntry, ReplyEmpty, ReplyOpen};
 use std::time::{Duration, SystemTime};
 use std::ffi::OsStr;
 
 impl Filesystem for RemoteFS {
     
-    //create dummy: è necessaria per FUSe ma non chiama nessuna API
+   // create dummy: è necessaria per FUSe ma non chiama nessuna API
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
-        _parent: u64,
+        parent: u64,
         name: &std::ffi::OsStr,
         _mode: u32,
         _size: u32,
@@ -62,9 +80,12 @@ impl Filesystem for RemoteFS {
         reply: ReplyCreate,
     ) {
         println!("CREATE called for {:?}", name);
-
+        let parent_path= self.get_path(parent).unwrap();
+        let real_path= parent_path.to_owned()+"/"+name.to_str().unwrap();
+        let ino= self.register_path(&real_path);
+        
         let attr = FileAttr {
-            ino: 2, // finto inode
+            ino, // finto inode
             size: 0,
             blocks: 0,
             atime: SystemTime::now(),
@@ -97,18 +118,19 @@ impl Filesystem for RemoteFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let path = self.ino_to_path(ino);
+        let path = self.get_path(ino).unwrap();
+        println!("execute read {}", path);
         let client = Client::new();
         let token = self.token.clone();
         let base_url = self.base_url.clone();
 
-task::block_in_place(|| {
+        task::block_in_place(|| {
+            
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let resp = client
-                    .get(format!("{}/files", base_url))
+                    .get(format!("{}/files/{}", base_url, path))
                     .bearer_auth(token)
-                    .query(&[("path", &path)])
                     .send()
                     .await;
 
@@ -137,7 +159,9 @@ task::block_in_place(|| {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let path = self.ino_to_path(ino);
+        
+        let path = self.get_path(ino).unwrap();
+        println!("execute write {}", path);
         let client = Client::new();
         let token = self.token.clone();
         let base_url = self.base_url.clone();
@@ -147,9 +171,8 @@ task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let resp = client
-                    .put(format!("{}/files", base_url))
+                    .put(format!("{}/files/{}", base_url, path))
                     .bearer_auth(token)
-                    .json(&WriteRequest { path, data: &data_copy })
                     .send()
                     .await;
 
@@ -163,16 +186,135 @@ task::block_in_place(|| {
 
     fn getattr(&mut self, _: &Request, ino: u64, _: Option<u64>, reply: ReplyAttr) {
         println!("getattr(ino={})", ino);
+        
         let ts = SystemTime::now();
+        let (kind, perm, size, nlink) = if ino == 1 {
+            (FileType::Directory, 0o755, 0, 2)
+        } else {
+            (FileType::RegularFile, 0o644, 128, 1)
+        };
+
         let attr = FileAttr {
             ino,
-            size: 0,
-            blocks: 0,
+            size,
+            blocks: 1,
             atime: ts,
             mtime: ts,
             ctime: ts,
             crtime: ts,
-            kind: FileType::RegularFile,
+            kind,
+            perm,
+            nlink,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        };
+
+        reply.attr(&Duration::new(1, 0), &attr);
+    }
+
+
+   
+
+    fn readdir(
+        &mut self, 
+        _req: &Request, 
+        ino: u64, _: u64, 
+        offset: i64, 
+        mut reply: 
+        ReplyDirectory) {
+        println!("readdir(ino={}, offset={})", ino, offset);
+
+        let Some(path) = self.get_path(ino) else {
+            reply.error(ENOENT);
+            return;
+        };
+
+        println!("execute list {}", path);
+        let client = Client::new();
+        let token = self.token.clone();
+        let base_url = self.base_url.clone();
+
+        let files: Vec<String> =task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let resp = client
+                    .get(format!("{}/list/{}", base_url, path)) // path già con /
+                    .bearer_auth(token)
+                    .send()
+                    .await;
+
+                    println!("{:?}", resp);
+                    match resp {
+                    Ok(r) if r.status().is_success() =>{
+                        let v= r.json().await;
+                        let res;
+                        //DEbug!
+                        match v{
+                            Ok(obj)=>{println!("json {:?}", obj); res=obj;},
+                            Err(_)=>{res=Vec::new();}
+                        }
+                        res                       
+                    }
+                    ,
+                    _ => Vec::new(),
+                    }
+                
+            })
+        });
+
+    let mut i = offset;
+        if i == 0 {
+            let _= reply.add(1, 1, FileType::Directory, ".");
+            i += 1;
+            let _= reply.add(1, 2, FileType::Directory, "..");
+            i += 1;
+        }
+
+        for (idx, name) in files.iter().enumerate().skip((i - 2) as usize) {
+            let next_offset = (idx as i64) + 3; // offset successivo
+            let _ =reply.add((idx as u64) + 2, next_offset, FileType::RegularFile, OsStr::new(name));
+        }
+
+        reply.ok();
+    
+    }
+//n.b. dopo aver ottenuto la lista dei file come vettore chiede 
+// gli atrributi tramite getattr
+
+    fn lookup(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: ReplyEntry,
+    ) {
+    //DUMMY FUNCTION new server api needed
+    println!("lookup(parent={}, name={:?})", parent, name);
+    let parent_path= self.get_path(parent).unwrap();
+    let real_path= parent_path.to_owned()+"/"+name.to_str().unwrap();
+    let ino= self.register_path(&real_path);
+    //DA CAMBIARE!
+    let kind;
+    if name.to_str().unwrap().contains(".txt"){
+        kind=FileType::RegularFile;
+    }else{
+        kind=FileType::Directory;
+    }
+    // Se il parent è la root (1), e abbiamo un file, creiamo un inode fittizio
+    //ALWAYS TRUE
+        let ts = SystemTime::now();
+        let attr = FileAttr {
+            ino, // inode fittizio
+            size: 128,
+            blocks: 1,
+            atime: ts,
+            mtime: ts,
+            ctime: ts,
+            crtime: ts,
+            kind,
             perm: 0o644,
             nlink: 1,
             uid: 1000,
@@ -181,23 +323,51 @@ task::block_in_place(|| {
             flags: 0,
             blksize: 512,
         };
-        reply.attr(&Duration::new(1, 0), &attr);
+
+        // TTL di 1 secondo
+        reply.entry(&Duration::new(1, 0), &attr, 0);
+   
     }
 
-    fn readdir(&mut self, _: &Request, ino: u64, _: u64, offset: i64, mut reply: ReplyDirectory) {
-        println!("readdir(ino={}, offset={})", ino, offset);
-        if ino == 1 {
-            if offset == 0 {
-                reply.add(1, 0, FileType::Directory, &OsStr::new("."));
-                reply.add(1, 1, FileType::Directory, &OsStr::new(".."));
-            }
-            reply.ok();
-        } else {
-            reply.error(libc::ENOENT);
-        }
+//DUMMY FUNCTION FOR FUSE
+    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        println!("open(ino={})", ino);
+        reply.opened(0, 0); // successo, nessun handle particolare
+    }
+
+    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        println!("flush(ino={})", ino);
+        reply.ok(); // non serve fare nulla
+    }
+
+    fn release(&mut self, _req: &Request, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+        println!("release(ino={})", ino);
+        reply.ok(); // idem
+    }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        println!("unlink(parent={}, name={:?})", parent, name);
+        reply.error(ENOSYS); // ancora non supportato
     }
 
 }
+
+
+
+fn ensure_unmounted(mountpoint: &str) {
+    let status = Command::new("fusermount3")
+        .arg("-u")
+        .arg(mountpoint)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => println!("Unmounted existing mount at {}", mountpoint),
+        Ok(_) => println!("Mount not mounted or already unmounted."),
+        Err(e) => eprintln!("Error unmounting {}: {:?}", mountpoint, e),
+    }
+}
+
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -276,7 +446,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let token= login_res.token;
         println!("token: {}", token);
         let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token);
-        let mountpoint = "/home/irene/progetto_rust_filesystem/client/mnt/remote-fs";
+        let mountpoint = "/home/irene/progetto_rust_filesystem/client/mount";
+        ensure_unmounted(mountpoint);
         println!("Mounting Remote FS at {}", mountpoint);
         fuser::mount2(fs, mountpoint, &[])?;   
     } else {
@@ -298,7 +469,7 @@ impl Drop for RemoteFS {
         println!("smonto fuse");
         let _ = Command::new("fusermount3")
             .arg("-u")
-            .arg("/home/irene/progetto_rust_filesystem/client/mnt/remote-fs")
+            .arg("/home/irene/progetto_rust_filesystem/client/mount")
             .status();
     }
 }
