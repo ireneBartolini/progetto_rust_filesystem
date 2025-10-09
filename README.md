@@ -38,23 +38,23 @@ DELETE /files/<path> – Delete file or directory
 
 ## List directory contents
 curl -X GET http://127.0.0.1:8080/list/ \
-  -H "Authorization: Bearer ALICE_TOKEN_HERE"
+  -H "Authorization: Bearer $TOKEN_ALICE"
 
 ## read file content 
 curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt
 
 ## write file content
 curl -X PUT http://127.0.0.1:8080/files/alice_secret.txt \
-  -H "Authorization: Bearer ALICE_TOKEN_HERE" \
+  -H "Authorization: Bearer $TOKEN_ALICE" \
   -d "This is Alice's private file!"
 
 ## make dir 
 curl -X POST http://127.0.0.1:8080/mkdir/alice_documents \
-  -H "Authorization: Bearer ALICE_TOKEN_HERE"
+  -H "Authorization: Bearer $TOKEN_ALICE"
   
 ## delete 
 curl -X DELETE http://127.0.0.1:8080/files/alice_diary.txt \
-  -H "Authorization: Bearer ALICE_TOKEN_HERE"
+  -H "Authorization: Bearer $TOKEN_ALICE"
 
 ## register user
 curl -X POST http://127.0.0.1:8080/auth/register \
@@ -65,6 +65,12 @@ curl -X POST http://127.0.0.1:8080/auth/register \
 curl -X POST http://127.0.0.1:8080/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username": "alice", "password": "password123"}'
+
+## in order to save the token
+TOKEN_ALICE=$(curl -s -X POST http://127.0.0.1:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "password123"}' | \
+  grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 
 
   ### PER WINDOWS 

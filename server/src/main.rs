@@ -133,15 +133,14 @@ async fn list_dir(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    println!("=== LIST_DIR CALLED === Path: '{}'", path);
 
-    let username = match extract_user_from_headers(&headers, &app_state.auth_service) {
-        Ok(user) => {
-            println!("Authenticated user: {}", user.0);
-            user
+    let auth_service = &app_state.auth_service;
+
+    let (_username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
+        Ok((user, id)) => {
+            (user, id)
         },
         Err(e) => {
-            println!("Authentication failed: {}", e);
             return (StatusCode::UNAUTHORIZED, e).into_response();
         },
     };
@@ -152,25 +151,18 @@ async fn list_dir(
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
-    // TODO: Ottieni user_id reale dal database
-    let user_id = 1; // Hardcoded per ora
-
     let target_path = if path.is_empty() {
-        "/".to_string()
+        "".to_string()
     } else {
-        format!("/{}", path)
+        format!("{}", path)
     };
 
-    println!("🎯 Target path: '{}'", target_path);
-
     // Usa il nuovo metodo che restituisce FileInfo
-    match fs.list_contents_with_metadata(&target_path, user_id) {
+    match fs.list_contents_with_metadata(&target_path, user_id as i64) {
         Ok(files_info) => {
-            println!("📋 Found {} accessible files", files_info.len());
             Json(files_info).into_response()
         },
         Err(e) => {
-            println!("❌ Error listing directory: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         },
     }
@@ -209,11 +201,8 @@ async fn write_file(
     body: String,
 ) -> impl IntoResponse {
     let auth_service = &app_state.auth_service;
-    if let Err(e) = extract_user_from_headers(&headers, &auth_service) {
-        return (StatusCode::UNAUTHORIZED, e).into_response();
-    }
 
-    let (username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
+    let (_username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
         Ok((user, id)) => {
             println!("✅ Authenticated user: {} (id: {})", user, id);
             (user, id)
