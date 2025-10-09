@@ -264,6 +264,10 @@ async fn mkdir(
     if let Err(e) = extract_user_from_headers(&headers, &auth_service) {
         return (StatusCode::UNAUTHORIZED, e).into_response();
     }
+    let (_username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
+        Ok((user, id)) => (user, id),
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
 
     let mut guard = app_state.filesystem.lock().unwrap();
     let fs = match guard.as_mut() {
@@ -277,7 +281,7 @@ async fn mkdir(
     let old_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("");
     let new_dir = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
-    match fs.make_dir(&format!("/{}", old_dir), new_dir) {
+    match fs.make_dir_metadata(&format!("/{}", old_dir), new_dir, user_id as i64, "000") {
         Ok(_) => "Directory created successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),

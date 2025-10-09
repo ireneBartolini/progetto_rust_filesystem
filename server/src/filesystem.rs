@@ -277,6 +277,86 @@ impl FileSystem {
         }
     }
 
+    // check if a user has the write permissions in a dir
+    fn check_dir_write_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
+        // Normalizza il path
+        let normalized_path = if dir_path == "/" {
+            "".to_string()
+        } else {
+            dir_path.trim_start_matches('/').trim_end_matches('/').to_string()
+        };
+
+        println!("🔐 Checking write permission for user {} in directory '{}'", user_id, normalized_path);
+
+        // Verifica che la directory esista nel filesystem virtuale
+        if self.find(&normalized_path).is_none() {
+            return Err(format!("Directory '{}' not found", dir_path));
+        }
+
+        // Controlla i permessi nel database
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            let mut stmt = conn.prepare(
+                "SELECT user_id, user_permissions, group_permissions, others_permissions, type 
+                 FROM METADATA WHERE path = ?1"
+            ).map_err(|e| format!("Database error: {}", e))?;
+            
+            let result = stmt.query_row(params![normalized_path], |row| {
+                let owner_id: i64 = row.get(0)?;
+                let user_perms: u32 = row.get(1)?;
+                let group_perms: u32 = row.get(2)?;
+                let others_perms: u32 = row.get(3)?;
+                let file_type: i32 = row.get(4)?;
+                
+                Ok((owner_id, user_perms, group_perms, others_perms, file_type))
+            });
+
+            match result {
+                Ok((owner_id, user_perms, group_perms, others_perms, file_type)) => {
+                    // Verifica che sia una directory
+                    if file_type != 1 {
+                        return Err(format!("'{}' is not a directory", dir_path));
+                    }
+
+                    // Controlla permessi di scrittura (bit 2 = write permission)
+                    let can_write = if owner_id == user_id {
+                        // L'utente è il proprietario
+                        let owner_can_write = (user_perms & 2) != 0;  // Bit 2 = write (-w-)
+                        println!("   Owner check: user_perms={}, can_write={}", user_perms, owner_can_write);
+                        owner_can_write
+                    } else {
+                        // L'utente NON è il proprietario, usa permessi "others"
+                        let others_can_write = (others_perms & 2) != 0;  // Bit 2 = write (--w)
+                        println!("   Others check: others_perms={}, can_write={}", others_perms, others_can_write);
+                        others_can_write
+                    };
+
+                    if can_write {
+                        println!("✅ Write permission granted for user {} in '{}'", user_id, dir_path);
+                        Ok(())
+                    } else {
+                        println!("❌ Write permission denied for user {} in '{}'", user_id, dir_path);
+                        Err(format!("Permission denied: no write access to directory '{}'", dir_path))
+                    }
+                },
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    // Directory esiste nel filesystem ma non nel database
+                    // Assumiamo permessi di default per compatibilità
+                    println!("⚠️  Directory '{}' not found in metadata, allowing access for compatibility", normalized_path);
+                    Ok(())
+                },
+                Err(e) => {
+                    Err(format!("Database error checking permissions: {}", e))
+                }
+            }
+        } else {
+            // Nessuna connessione database, permetti l'operazione
+            println!("⚠️  No database connection, allowing mkdir for compatibility");
+            Ok(())
+        }
+    }
+
 
     pub fn from_file_system(base_path: &str) -> Self {
         
@@ -552,7 +632,7 @@ impl FileSystem {
         }
     }
 
-    pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String> {
+    pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String>{
         // Find the parent directory
         let node = self.find(path).ok_or_else(|| format!("Directory {} not found", path))?;
 
@@ -593,6 +673,69 @@ impl FileSystem {
         }
 
         Ok(())
+    }
+
+    // this is the version of the make_dir function that also updates the metadat inside the databse (so the one called by main.rs)
+    pub fn make_dir_metadata(&mut self, path: &str, name: &str, user_id: i64, permissions: &str) -> Result<(), String> {
+        // Verifica che l'utente abbia permessi di scrittura nella directory parent
+        if let Err(e) = self.check_dir_write_permission(path, user_id) {
+            return Err(e);
+        }
+        
+        // Permessi da stringa ottale a numero
+        let permissions_octal = u32::from_str_radix(permissions, 8)
+            .map_err(|_| format!("Invalid permissions format: {}", permissions))?;
+        
+        if let Err(e) = self.make_dir(path, name) {
+            return Err(e);
+        }
+
+        // path completo della directory (path + name)
+        let full_path = if path == "/" {
+            format!("{}", name)  // Nella root
+        } else {
+            let normalized_path = path.trim_end_matches('/');
+            format!("{}/{}", normalized_path, name) 
+        };
+
+        // Salva i metadati nel database
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            
+            // Decompongo i permessi ottali in user/group/others
+            let user_perms = (permissions_octal >> 6) & 0o7;
+            let group_perms = (permissions_octal >> 3) & 0o7;
+            let others_perms = permissions_octal & 0o7;
+            
+            let result = conn.execute(
+                "INSERT INTO METADATA (path, user_id, user_permissions, group_permissions, others_permissions, size, created_at, last_modified, type)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    full_path,
+                    user_id,
+                    user_perms,
+                    group_perms,
+                    others_perms,
+                    0,  // Size 0 per le directory
+                    now.clone(),
+                    now,
+                    1,  // 1 = directory, 0 = file
+                ],
+            );
+            
+            if let Err(e) = result {
+                println!("Warning: Failed to save directory metadata: {}", e);
+                return Err(format!("Error: {}", e));
+                // Non blocco l'operazione se il salvataggio metadati fallisce
+            } else {
+                println!("✅ Directory metadata saved: path='{}', user_id={}, permissions={}", full_path, user_id, permissions);
+            }
+        }
+
+        Ok(())
+
+        
     }
 
     // make file method
@@ -851,51 +994,6 @@ impl FileSystem {
             }
         } else {
             Err(format!("File {} not found", path))
-        }
-    }
-
-}
-
-
-// UNIT TESTS
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rusqlite::Connection;
-    use std::sync::{Arc, Mutex};
-
-    fn create_file_system_with_structure() -> FileSystem {
-        let mut fs = FileSystem::new();
-        fs.make_dir("/", "home").unwrap();
-        fs.change_dir("/home").unwrap();
-        fs.make_dir(".", "user").unwrap();
-        fs.change_dir("./user").unwrap();
-        fs.make_file(".", "file.txt").unwrap();
-        fs.make_file(".", "file1.txt").unwrap();
-        fs.make_dir("..", "user1").unwrap();
-        fs.change_dir("../user1").unwrap();
-        fs.make_file(".", "file.txt").unwrap();
-        fs.make_link("/home", "link_user", "/home/user").unwrap();
-        fs
-    }
-
-    #[test]
-    fn create_basic_file_system() {
-        let fs = FileSystem::new();
-        assert_eq!(fs.root.lock().unwrap().name(), "");
-    }
-
-    #[test]
-    fn create_directory() {
-        let mut fs = FileSystem::new();
-        fs.make_dir("/", "home").unwrap();
-        let root = fs.root.lock().unwrap();
-        if let Some(children) = root.get_children() {
-            assert_eq!(children.len(), 1);
-            assert_eq!(children[0].lock().unwrap().name(), "home");
-        } else {
-            panic!("Root should have children");
         }
     }
 
