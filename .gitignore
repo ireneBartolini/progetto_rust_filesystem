@@ -27,3 +27,5 @@ tests/tmp/
 **/remote-fs
 server/database
 **/db.db
+
+**/mount
