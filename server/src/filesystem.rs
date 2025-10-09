@@ -993,6 +993,11 @@ impl FileSystem {
             let path_buf = PathBuf::from(path);
             let path_parent=path_buf.parent().unwrap().to_str().unwrap();
             let file_name= path_buf.file_name().unwrap().to_str().unwrap();
+
+            // in order to create a file we need to have the write permission on the directory
+            if let Err(e) = self.check_dir_write_permission(path_parent, user_id) {
+                return Err(e);
+            }
             
             let parent= self.find(path_parent);
             if let Some(p)=parent{
