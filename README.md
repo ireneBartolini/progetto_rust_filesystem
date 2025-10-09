@@ -146,3 +146,10 @@ echo ".." > file.txt
 create	crea solo inode fittizio	non fare nulla sul server
 2. write	<- invia direttamente PUT /files con path e data	il server creerà o aggiornerà il file
 3. getattr	restituisci attributi 
+
+COSE DA FARE 
+- sistemare i path <- funziona lo stesso ma ci sono 2 // all'inizio
+- sistemare la write di un file già esistenete <- penso sia un problema di attributi che la fopen dovrebbe verificare
+- fare un file a parte con il RemoteFS per rendere tutto più ordinato
+- finire le altre funzioni: mkdir e delete 
+- cd va implementata?

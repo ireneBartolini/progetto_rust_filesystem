@@ -29,3 +29,5 @@ tests/tmp/
 server/database
 **/db.db
 server/database/db.db
+
+**/mount
