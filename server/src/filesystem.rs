@@ -815,9 +815,17 @@ impl FileSystem {
         }
     }
 
-    pub fn delete(&self, path: &str) -> Result<(), String> {
+    pub fn delete(&self, path: &str, user_id: i64) -> Result<(), String> {
         let node:  Option<FSNode>  = self.find(path);
         if let Some(n) = node {
+
+            // per eliminare un file o cartella si devono avere i permessi in scrittura sulla parent directory
+            let path_ = Path::new(&path);
+            let parent_dir = path_.parent().and_then(|p| p.to_str()).unwrap_or("");
+
+            if let Err(e) = self.check_dir_write_permission(parent_dir, user_id) {
+                return Err(e);
+            }
             
             if self.side_effects {
                 let item=n.lock().unwrap();
@@ -842,6 +850,12 @@ impl FileSystem {
             
             }
 
+            // Remove from the database
+            if let Err(e) = self.remove_from_database(path) {
+                println!("Warning: Failed to remove metadata from database: {}", e);
+                // Non blocco l'operazione se la rimozione dal database fallisce, si segnala solo un warning
+            }
+
             let lock  = n.lock().unwrap();
             let name= (lock.name()).to_string();
             let par= lock.parent();
@@ -860,6 +874,71 @@ impl FileSystem {
 
     pub fn set_side_effects(&mut self, side_effects: bool) {
         self.side_effects = side_effects;
+    }
+
+    fn remove_from_database(&self, item_path: &str) -> Result<(), String> {
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            let normalized_path = item_path.trim_start_matches('/');
+            
+            println!("🗄️  Removing from database: '{}'", normalized_path);
+            
+            // Controlla se è una directory
+            let mut stmt = conn.prepare(
+                "SELECT type FROM METADATA WHERE path = ?1"
+            ).map_err(|e| format!("Database error: {}", e))?;
+            
+            let file_type = stmt.query_row(params![normalized_path], |row| {
+                Ok(row.get::<_, i32>(0)?)
+            }).optional().map_err(|e| format!("Database error: {}", e))?;
+            
+            match file_type {
+                Some(1) => {
+                    // Directory - rimuovi tutto il contenuto ricorsivamente
+                    println!("📁 Removing directory and all contents from database");
+                    
+                    let delete_result = conn.execute(
+                        "DELETE FROM METADATA WHERE path = ?1 OR path LIKE ?2",
+                        params![normalized_path, format!("{}/%", normalized_path)],
+                    );
+                    
+                    match delete_result {
+                        Ok(rows_affected) => {
+                            println!("✅ Removed {} items from database", rows_affected);
+                            Ok(())
+                        },
+                        Err(e) => Err(format!("Failed to remove directory from database: {}", e))
+                    }
+                },
+                Some(0) => {
+                    // File - rimuovi solo questo
+                    println!("📄 Removing file from database");
+                    
+                    let delete_result = conn.execute(
+                        "DELETE FROM METADATA WHERE path = ?1",
+                        params![normalized_path],
+                    );
+                    
+                    match delete_result {
+                        Ok(rows_affected) => {
+                            println!("✅ Removed {} file(s) from database", rows_affected);
+                            Ok(())
+                        },
+                        Err(e) => Err(format!("Failed to remove file from database: {}", e))
+                    }
+                },
+                None => {
+                    println!("⚠️  Item '{}' not found in database", normalized_path);
+                    Ok(())
+                },
+                Some(t) => {
+                    Err(format!("Unknown file type {} in database", t))
+                }
+            }
+        } else {
+            println!("⚠️  No database connection, skipping database removal");
+            Ok(())
+        }
     }
 
     pub fn write_file(&mut self, path: &str, content: &str, user_id: i64, permissions: &str) -> Result<(), String> {

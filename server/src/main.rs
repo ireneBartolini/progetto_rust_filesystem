@@ -240,6 +240,11 @@ async fn delete_file(
         return (StatusCode::UNAUTHORIZED, e).into_response();
     }
 
+    let (_username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
+        Ok((user, id)) => (user, id),
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+    };
+
     let mut guard = app_state.filesystem.lock().unwrap();
     let fs = match guard.as_mut() {
         Some(fs) => fs,
@@ -247,7 +252,7 @@ async fn delete_file(
     };
 
     fs.change_dir("/").ok();
-    match fs.delete(&path) {
+    match fs.delete(&path, user_id as i64) {
         Ok(_) => "Directory/File deleted successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Permission denied") => (StatusCode::FORBIDDEN, e).into_response(),
