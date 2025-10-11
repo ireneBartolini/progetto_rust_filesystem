@@ -7,12 +7,13 @@ use rusqlite::{params, Connection, Result as SqlResult};
 use std::sync::{Arc, Mutex};
 use std::path::Path as StdPath;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, State, Query},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post, put, delete},
     Router,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 #[derive(Clone)]
@@ -71,6 +72,12 @@ fn create_user_filesystem(username: &str, connection: Arc<Mutex<Connection>>) ->
     fs.set_side_effects(true);
     fs.set_database(connection);
     Ok(fs)
+}
+
+fn is_valid_permissions(permissions: &str) -> bool {
+    permissions.len() == 3 &&
+    permissions.chars().all(|c| c.is_ascii_digit()) &&
+    permissions.chars().all(|c| c as u8 >= b'0' && c as u8 <= b'7')
 }
 
 async fn register(
@@ -198,6 +205,7 @@ async fn write_file(
     State(app_state): State<AppState>,
     Path(path): Path<String>,
     headers: HeaderMap,
+    query: Query<HashMap<String, String>>,
     body: String,
 ) -> impl IntoResponse {
     let auth_service = &app_state.auth_service;
@@ -213,6 +221,14 @@ async fn write_file(
         },
     };
 
+    // Leggi i permessi dalla query (default 644 per file)
+    let permissions = query.get("permissions").unwrap_or(&"644".to_string()).clone();
+    
+    // check if the permissions are valid, otherwise return a BAD_REQUEST error
+    if !is_valid_permissions(&permissions) {
+        return (StatusCode::BAD_REQUEST, "Invalid permissions format. Use 3 octal digits (e.g., 644)").into_response();
+    }
+
     let mut guard = app_state.filesystem.lock().unwrap();
     let fs = match guard.as_mut() {
         Some(fs) => fs,
@@ -221,7 +237,7 @@ async fn write_file(
 
     // TODO cahnge user_id
     fs.change_dir("/").ok();
-    match fs.write_file(&path, &body, user_id as i64, "600") {
+    match fs.write_file(&path, &body, user_id as i64, &permissions) {
         Ok(_) => "File written successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -264,6 +280,7 @@ async fn mkdir(
     State(app_state): State<AppState>,
     Path(path): Path<String>,
     headers: HeaderMap,
+    query: Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let auth_service = &app_state.auth_service;
     if let Err(e) = extract_user_from_headers(&headers, &auth_service) {
@@ -273,6 +290,14 @@ async fn mkdir(
         Ok((user, id)) => (user, id),
         Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
     };
+
+    // Leggi i permessi dalla query (default 755 per directory)
+    let permissions = query.get("permissions").unwrap_or(&"755".to_string()).clone();
+    
+    // check if the permissions are valid, otherwise return a BAD_REQUEST error
+    if !is_valid_permissions(&permissions) {
+        return (StatusCode::BAD_REQUEST, "Invalid permissions format. Use 3 octal digits (e.g., 755)").into_response();
+    }
 
     let mut guard = app_state.filesystem.lock().unwrap();
     let fs = match guard.as_mut() {
@@ -286,7 +311,7 @@ async fn mkdir(
     let old_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("");
     let new_dir = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
-    match fs.make_dir_metadata(&format!("/{}", old_dir), new_dir, user_id as i64, "000") {
+    match fs.make_dir_metadata(&format!("/{}", old_dir), new_dir, user_id as i64, &permissions) {
         Ok(_) => "Directory created successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),

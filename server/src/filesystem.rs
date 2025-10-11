@@ -280,13 +280,14 @@ impl FileSystem {
     // check if a user has the write permissions in a dir
     fn check_dir_write_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
         // Normalizza il path
-        let normalized_path = if dir_path == "/" {
-            "".to_string()
+        let normalized_path = if dir_path == "/" || dir_path == "" {
+            return Ok(())       // In the root we always have write permissions
         } else {
             dir_path.trim_start_matches('/').trim_end_matches('/').to_string()
         };
 
         println!("🔐 Checking write permission for user {} in directory '{}'", user_id, normalized_path);
+
 
         // Verifica che la directory esista nel filesystem virtuale
         if self.find(&normalized_path).is_none() {
@@ -299,10 +300,10 @@ impl FileSystem {
             
             let mut stmt = conn.prepare(
                 "SELECT user_id, user_permissions, group_permissions, others_permissions, type 
-                 FROM METADATA WHERE path = ?1"
+                 FROM METADATA WHERE path = ?1 and User_ID = ?2"
             ).map_err(|e| format!("Database error: {}", e))?;
             
-            let result = stmt.query_row(params![normalized_path], |row| {
+            let result = stmt.query_row(params![normalized_path, user_id], |row| {
                 let owner_id: i64 = row.get(0)?;
                 let user_perms: u32 = row.get(1)?;
                 let group_perms: u32 = row.get(2)?;
@@ -343,11 +344,11 @@ impl FileSystem {
                 Err(rusqlite::Error::QueryReturnedNoRows) => {
                     // Directory esiste nel filesystem ma non nel database
                     // Assumiamo permessi di default per compatibilità
-                    println!("⚠️  Directory '{}' not found in metadata, allowing access for compatibility", normalized_path);
-                    Ok(())
+                    println!("⚠️  Directory '{}' not found in metadata", normalized_path);
+                    Err(format!("Database error checking permissions: {}", normalized_path))
                 },
                 Err(e) => {
-                    Err(format!("Database error checking permissions: {}", e))
+                    Err(format!("Directory {} not found", e))
                 }
             }
         } else {
@@ -692,10 +693,17 @@ impl FileSystem {
 
         // path completo della directory (path + name)
         let full_path = if path == "/" {
-            format!("{}", name)  // Nella root
+            // Nella root: solo il nome
+            name.to_string()
         } else {
-            let normalized_path = path.trim_end_matches('/');
-            format!("{}/{}", normalized_path, name) 
+            // Nelle sottodirectory: rimuovi "/" iniziale e finale, poi aggiungi nome
+            let normalized_path = path.trim_start_matches('/').trim_end_matches('/');
+            if normalized_path.is_empty() {
+                // Caso edge: path era solo "/"
+                name.to_string()
+            } else {
+                format!("{}/{}", normalized_path, name)
+            }
         };
 
         // Salva i metadati nel database
@@ -851,7 +859,7 @@ impl FileSystem {
             }
 
             // Remove from the database
-            if let Err(e) = self.remove_from_database(path) {
+            if let Err(e) = self.remove_from_database(path, user_id) {
                 println!("Warning: Failed to remove metadata from database: {}", e);
                 // Non blocco l'operazione se la rimozione dal database fallisce, si segnala solo un warning
             }
@@ -876,7 +884,7 @@ impl FileSystem {
         self.side_effects = side_effects;
     }
 
-    fn remove_from_database(&self, item_path: &str) -> Result<(), String> {
+    fn remove_from_database(&self, item_path: &str, user_id: i64) -> Result<(), String> {
         if let Some(ref db) = self.db_connection {
             let conn = db.lock().unwrap();
             let normalized_path = item_path.trim_start_matches('/');
@@ -885,54 +893,108 @@ impl FileSystem {
             
             // Controlla se è una directory
             let mut stmt = conn.prepare(
-                "SELECT type FROM METADATA WHERE path = ?1"
+                "SELECT type FROM METADATA WHERE path = ?1 AND User_ID = ?2"
             ).map_err(|e| format!("Database error: {}", e))?;
             
-            let file_type = stmt.query_row(params![normalized_path], |row| {
+            let file_type = stmt.query_row(params![normalized_path, user_id], |row| {
                 Ok(row.get::<_, i32>(0)?)
             }).optional().map_err(|e| format!("Database error: {}", e))?;
             
             match file_type {
                 Some(1) => {
-                    // Directory - rimuovi tutto il contenuto ricorsivamente
-                    println!("📁 Removing directory and all contents from database");
+                    // ✅ DIRECTORY: Verifica proprietà di tutti i contenuti ricorsivamente
+                    println!("📁 Removing directory and checking ownership of all contents");
                     
-                    let delete_result = conn.execute(
-                        "DELETE FROM METADATA WHERE path = ?1 OR path LIKE ?2",
-                        params![normalized_path, format!("{}/%", normalized_path)],
-                    );
+                    // ✅ TROVA: Tutti i file/directory contenuti con controllo proprietà
+                    let mut contents_stmt = conn.prepare(
+                        "SELECT path, user_id FROM METADATA 
+                        WHERE ((path = ?1) OR 
+                            (path LIKE ?2)) AND
+                            User_ID = ?3
+                        ORDER BY LENGTH(path) DESC"  // Prima i file più profondi
+                    ).map_err(|e| format!("Database error: {}", e))?;
                     
-                    match delete_result {
-                        Ok(rows_affected) => {
-                            println!("✅ Removed {} items from database", rows_affected);
-                            Ok(())
-                        },
-                        Err(e) => Err(format!("Failed to remove directory from database: {}", e))
+                    let recursive_pattern = if normalized_path.is_empty() {
+                        "%".to_string()  // Root directory - tutto
+                    } else {
+                        format!("{}/%", normalized_path)  // Contenuti della directory
+                    };
+                    
+                    let contents_iter = contents_stmt.query_map(
+                        params![normalized_path, recursive_pattern, user_id], 
+                        |row| {
+                            let path: String = row.get(0)?;
+                            let owner_id: i64 = row.get(1)?;
+                            Ok((path, owner_id))
+                        }
+                    ).map_err(|e| format!("Database error: {}", e))?;
+                    
+                    let mut paths_to_delete = Vec::new();
+                    
+                    // ✅ CONTROLLA: Proprietà di ogni singolo file/directory
+                    for content_result in contents_iter {
+                        let (content_path, content_owner_id) = 
+                            content_result.map_err(|e| format!("Database error: {}", e))?;
+                        
+                        println!("   📋 Found item: '{}', owner={}", content_path, content_owner_id);
+                        
+                        if content_owner_id != user_id {
+                            return Err(format!(
+                                "Permission denied: cannot delete '{}' (owned by user {}, you are user {})", 
+                                content_path, content_owner_id, user_id
+                            ));
+                        }
+                        
+                        paths_to_delete.push(content_path);
                     }
+                    
+                    // ✅ ELIMINA: Solo i file dell'utente (doppio controllo con WHERE user_id)
+                    for path_to_delete in paths_to_delete {
+                        let delete_result = conn.execute(
+                            "DELETE FROM METADATA WHERE path = ?1 AND user_id = ?2",
+                            params![path_to_delete, user_id],
+                        );
+                        
+                        match delete_result {
+                            Ok(rows) => {
+                                if rows > 0 {
+                                    println!("   ✅ Deleted '{}' from database", path_to_delete);
+                                } else {
+                                    println!("   ⚠️  No rows deleted for '{}' (ownership changed?)", path_to_delete);
+                                }
+                            },
+                            Err(e) => {
+                                return Err(format!("Failed to delete '{}' from database: {}", path_to_delete, e));
+                            }
+                        }
+                    }
+                    
+                    println!("✅ Successfully removed directory and all owned contents");
+                    Ok(())
                 },
                 Some(0) => {
-                    // File - rimuovi solo questo
-                    println!("📄 Removing file from database");
+                    // ✅ FILE: Elimina solo se appartiene all'utente
+                    println!("📄 Removing file from database (user {} owns it)", user_id);
                     
                     let delete_result = conn.execute(
-                        "DELETE FROM METADATA WHERE path = ?1",
-                        params![normalized_path],
+                        "DELETE FROM METADATA WHERE path = ?1 AND user_id = ?2",
+                        params![normalized_path, user_id],
                     );
                     
                     match delete_result {
                         Ok(rows_affected) => {
-                            println!("✅ Removed {} file(s) from database", rows_affected);
-                            Ok(())
+                            if rows_affected > 0 {
+                                println!("✅ Removed file '{}' from database", normalized_path);
+                                Ok(())
+                            } else {
+                                Err(format!("Failed to delete file '{}': no rows affected (permission issue?)", normalized_path))
+                            }
                         },
                         Err(e) => Err(format!("Failed to remove file from database: {}", e))
                     }
                 },
-                None => {
-                    println!("⚠️  Item '{}' not found in database", normalized_path);
-                    Ok(())
-                },
-                Some(t) => {
-                    Err(format!("Unknown file type {} in database", t))
+                t => {
+                    Err(format!("Unknown file type {:?} in database", t))
                 }
             }
         } else {
