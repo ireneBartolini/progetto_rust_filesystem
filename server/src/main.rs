@@ -169,6 +169,9 @@ async fn list_dir(
         Ok(files_info) => {
             Json(files_info).into_response()
         },
+        Err(e) if e.contains("not found") => {
+            (StatusCode::NOT_FOUND, e).into_response()
+        },
         Err(e) => {
             (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         },

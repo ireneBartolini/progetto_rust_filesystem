@@ -1,6 +1,3 @@
-
-
-
 async fn setup()-> String{
     let client = reqwest::Client::new();
 
@@ -46,8 +43,8 @@ async fn setup()-> String{
     client.post("http://127.0.0.1:8080/mkdir/test_dir/dir1")
     .bearer_auth(&token)
     .send()
-    .await.
-    unwrap();
+    .await
+    .unwrap();
 
     token.to_string()
 
@@ -81,10 +78,16 @@ async fn test_list_dir_api() {
         .unwrap();
 
     assert!(res.status().is_success());
-    let body: Vec<String> = res.json().await.unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    
+    // Extract just the names for backward compatibility with existing tests
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
     
     // assert on the body of the response
-    assert!(body.contains(&"file1.txt".to_string()) && body.contains(&"dir1".to_string()));
+    assert!(file_names.contains(&"file1.txt".to_string()) && file_names.contains(&"dir1".to_string()));
 
     // cleanup
     cleanup(token).await
@@ -105,9 +108,16 @@ async fn test_list_dir_dot() {
         .unwrap();
 
     assert!(res.status().is_success());
-    let body: Vec<String> = res.json().await.unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    
+    // Extract just the names for backward compatibility with existing tests
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    
     // dir1 is empty from setup
-    assert!(body.is_empty());
+    assert!(file_names.is_empty());
 
     cleanup(token).await;
 }
@@ -127,8 +137,15 @@ async fn test_list_dir_dotdot() {
         .unwrap();
 
     assert!(res.status().is_success());
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(body.contains(&"file1.txt".to_string()) && body.contains(&"dir1".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    
+    // Extract just the names for backward compatibility with existing tests
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    
+    assert!(file_names.contains(&"file1.txt".to_string()) && file_names.contains(&"dir1".to_string()));
 
     cleanup(token).await;
 }
@@ -148,8 +165,15 @@ async fn test_list_dir_dot_and_dotdot_combo() {
         .unwrap();
 
     assert!(res.status().is_success());
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(body.contains(&"file1.txt".to_string()) && body.contains(&"dir1".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    
+    // Extract just the names for backward compatibility with existing tests
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    
+    assert!(file_names.contains(&"file1.txt".to_string()) && file_names.contains(&"dir1".to_string()));
 
     cleanup(token).await;
 }
@@ -416,6 +440,124 @@ async fn test_file_contents_bad_request() {
 
 // TESTS ON
 // PUT /files/<path> – Write file contents
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_write_file_with_permissions() {
+    let token=setup().await;
+
+    let client = reqwest::Client::new();
+    // Write file with custom permissions (600)
+    let res = client
+        .put("http://127.0.0.1:8080/files/test_dir/private_file.txt?permissions=600")
+        .bearer_auth(&token)
+        .body("private content")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+
+    // Write file with public permissions (644)
+    let res = client
+        .put("http://127.0.0.1:8080/files/test_dir/public_file.txt?permissions=644")
+        .bearer_auth(&token)
+        .body("public content")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+
+    // List directory to check files exist
+    let res = client
+        .get("http://127.0.0.1:8080/list/test_dir")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+
+    assert!(file_names.contains(&"private_file.txt".to_string()));
+    assert!(file_names.contains(&"public_file.txt".to_string()));
+
+    // Check permissions in the response
+    let private_file = files.iter().find(|f| f["name"] == "private_file.txt").unwrap();
+    let public_file = files.iter().find(|f| f["name"] == "public_file.txt").unwrap();
+    
+    assert_eq!(private_file["permissions"].as_str().unwrap(), "-rw-------");
+    assert_eq!(public_file["permissions"].as_str().unwrap(), "-rw-r--r--");
+
+    cleanup(token).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_write_file_invalid_permissions() {
+    let token=setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to write file with invalid permissions
+    let res = client
+        .put("http://127.0.0.1:8080/files/test_dir/bad_perms.txt?permissions=888")
+        .bearer_auth(&token)
+        .body("should fail")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = res.text().await.unwrap();
+    assert!(body.contains("Invalid permissions"));
+
+    // Try with non-octal permissions
+    let res = client
+        .put("http://127.0.0.1:8080/files/test_dir/bad_perms2.txt?permissions=abc")
+        .bearer_auth(&token)
+        .body("should fail")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    cleanup(token).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_write_file_unauthorized() {
+    let token=setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to write file without authentication
+    let res = client
+        .put("http://127.0.0.1:8080/files/test_dir/unauthorized.txt")
+        .body("should fail")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Try with invalid token
+    let res = client
+        .put("http://127.0.0.1:8080/files/test_dir/unauthorized.txt")
+        .bearer_auth("invalid_token")
+        .body("should fail")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    cleanup(token).await;
+}
 
 #[tokio::test]
 #[serial_test::serial]
@@ -734,7 +876,7 @@ async fn test_mkdir_api() {
     let body = res.text().await.unwrap();
     assert!(body.contains("Directory created successfully"));
 
-    // check if the directory is actually there
+    // Check if the directory is actually there
     let res = client
         .get("http://127.0.0.1:8080/list/test_dir")
         .bearer_auth(&token)
@@ -743,10 +885,14 @@ async fn test_mkdir_api() {
         .unwrap();
 
     assert!(res.status().is_success());
-    let body: Vec<String> = res.json().await.unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
     
     // assert on the body of the response
-    assert!(body.contains(&"new_dir".to_string()));
+    assert!(file_names.contains(&"new_dir".to_string()));
 
     cleanup(token).await;
 }
@@ -774,8 +920,12 @@ async fn test_mkdir_dot() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(body.contains(&"new_dot_dir".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(file_names.contains(&"new_dot_dir".to_string()));
 
     cleanup(token).await;
 }
@@ -803,8 +953,12 @@ async fn test_mkdir_dotdot() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(body.contains(&"new_dotdot_dir".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(file_names.contains(&"new_dotdot_dir".to_string()));
 
     cleanup(token).await;
 }
@@ -832,8 +986,12 @@ async fn test_mkdir_dot_and_dotdot_combo() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(body.contains(&"new_combo_dir".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(file_names.contains(&"new_combo_dir".to_string()));
 
     cleanup(token).await;
 }
@@ -905,6 +1063,80 @@ async fn test_mkdir_on_file() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn test_mkdir_with_permissions() {
+    let token=setup().await;
+
+    let client = reqwest::Client::new();
+    // Create directory with custom permissions (700)
+    let res = client
+        .post("http://127.0.0.1:8080/mkdir/test_dir/private_dir?permissions=700")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+
+    // Create directory with public permissions (755)
+    let res = client
+        .post("http://127.0.0.1:8080/mkdir/test_dir/public_dir?permissions=755")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+
+    // List directory to check directories exist and have correct permissions
+    let res = client
+        .get("http://127.0.0.1:8080/list/test_dir")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+
+    assert!(file_names.contains(&"private_dir".to_string()));
+    assert!(file_names.contains(&"public_dir".to_string()));
+
+    // Check permissions in the response
+    let private_dir = files.iter().find(|f| f["name"] == "private_dir").unwrap();
+    let public_dir = files.iter().find(|f| f["name"] == "public_dir").unwrap();
+    
+    assert_eq!(private_dir["permissions"].as_str().unwrap(), "drwx------");
+    assert_eq!(public_dir["permissions"].as_str().unwrap(), "drwxr-xr-x");
+
+    cleanup(token).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_mkdir_invalid_permissions() {
+    let token=setup().await;
+
+    let client = reqwest::Client::new();
+    // Try to create directory with invalid permissions
+    let res = client
+        .post("http://127.0.0.1:8080/mkdir/test_dir/bad_perms_dir?permissions=888")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = res.text().await.unwrap();
+    assert!(body.contains("Invalid permissions"));
+
+    cleanup(token).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn test_mkdir_conflict() {
     let token=setup().await;
 
@@ -961,8 +1193,12 @@ async fn test_delete_file_success() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(!body.contains(&"delete_me.txt".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!file_names.contains(&"delete_me.txt".to_string()));
 
     cleanup(token).await;
 }
@@ -997,8 +1233,12 @@ async fn test_delete_directory_success() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(!body.contains(&"delete_dir".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!file_names.contains(&"delete_dir".to_string()));
 
     cleanup(token).await;
 }
@@ -1046,8 +1286,12 @@ async fn test_delete_nested_directory_success() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(!body.contains(&"outer".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!file_names.contains(&"outer".to_string()));
 
     cleanup(token).await;
 }
@@ -1103,8 +1347,9 @@ async fn test_delete_and_recreate_directory() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(body.is_empty());
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    assert!(files.is_empty());
 
     cleanup(token).await;
 }
@@ -1140,8 +1385,12 @@ async fn test_delete_file_dot() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(!body.contains(&"file_dot_delete.txt".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!file_names.contains(&"file_dot_delete.txt".to_string()));
 
     cleanup(token).await;
 }
@@ -1177,8 +1426,12 @@ async fn test_delete_file_dotdot() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(!body.contains(&"file_dotdot_delete.txt".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!file_names.contains(&"file_dotdot_delete.txt".to_string()));
 
     cleanup(token).await;
 }
@@ -1214,8 +1467,12 @@ async fn test_delete_file_dot_and_dotdot_combo() {
         .send()
         .await
         .unwrap();
-    let body: Vec<String> = res.json().await.unwrap();
-    assert!(!body.contains(&"file_combo_delete.txt".to_string()));
+    let body: serde_json::Value = res.json().await.unwrap();
+    let files: Vec<serde_json::Value> = body.as_array().unwrap().to_vec();
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!file_names.contains(&"file_combo_delete.txt".to_string()));
 
     cleanup(token).await;
 }

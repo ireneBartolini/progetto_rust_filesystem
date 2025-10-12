@@ -358,6 +358,83 @@ impl FileSystem {
         }
     }
 
+    fn check_dir_read_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
+        let normalized_path = if dir_path == "/" || dir_path == "" {
+            return Ok(()) // Root sempre accessibile
+        } else {
+            dir_path.trim_start_matches('/').trim_end_matches('/').to_string()
+        };
+
+        println!("🔐 Checking read permission for user {} in directory '{}'", user_id, normalized_path);
+
+        // Verifica che la directory esista nel filesystem virtuale
+        if self.find(&normalized_path).is_none() {
+            return Err(format!("Directory '{}' not found", dir_path));
+        }
+
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            let mut stmt = conn.prepare(
+                "SELECT user_id, user_permissions, group_permissions, others_permissions, type 
+                FROM METADATA WHERE path = ?1 AND User_ID = ?2"
+            ).map_err(|e| format!("Database error: {}", e))?;
+            
+            let result = stmt.query_row(params![normalized_path, user_id], |row| {
+                let owner_id: i64 = row.get(0)?;
+                let user_perms: u32 = row.get(1)?;
+                let group_perms: u32 = row.get(2)?;
+                let others_perms: u32 = row.get(3)?;
+                let file_type: i32 = row.get(4)?;
+                
+                Ok((owner_id, user_perms, group_perms, others_perms, file_type))
+            });
+
+            match result {
+                Ok((owner_id, user_perms, _group_perms, others_perms, file_type)) => {
+                    // Verifica che sia una directory
+                    if file_type != 1 {
+                        return Err(format!("'{}' is not a directory", dir_path));
+                    }
+
+                    // ✅ CONTROLLA: Permessi di lettura (bit 4) E execute (bit 1) sulla directory
+                    let can_access = if owner_id == user_id {
+                        let owner_can_read = (user_perms & 4) != 0;  // Bit 4 = read (r--)
+                        let owner_can_execute = (user_perms & 1) != 0;  // Bit 1 = execute (--x)
+                        println!("   Owner check: user_perms={}, can_read={}, can_execute={}", 
+                                user_perms, owner_can_read, owner_can_execute);
+                        owner_can_read && owner_can_execute
+                    } else {
+                        let others_can_read = (others_perms & 4) != 0;  // Bit 4 = read (r--)
+                        let others_can_execute = (others_perms & 1) != 0;  // Bit 1 = execute (--x)
+                        println!("   Others check: others_perms={}, can_read={}, can_execute={}", 
+                                others_perms, others_can_read, others_can_execute);
+                        others_can_read && others_can_execute
+                    };
+
+                    if can_access {
+                        println!("✅ Read permission granted for user {} in '{}'", user_id, dir_path);
+                        Ok(())
+                    } else {
+                        println!("❌ Read permission denied for user {} in '{}'", user_id, dir_path);
+                        Err(format!("Permission denied: no read access to directory '{}'", dir_path))
+                    }
+                },
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    println!("⚠️  Directory '{}' not found in metadata", normalized_path);
+                    Err(format!("Database error checking permissions: {}", normalized_path))
+                },
+                Err(e) => {
+                    Err(format!("Directory {} not found", e))
+                }
+            }
+        } else {
+            println!("⚠️  No database connection, allowing list for compatibility");
+            Ok(())
+        }
+    }
+
+
 
     pub fn from_file_system(base_path: &str) -> Self {
         
@@ -540,6 +617,42 @@ impl FileSystem {
         //  todo: come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. o un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?
         println!("❓come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. E un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?");
 
+        // Controlla se la directory esiste nel filesystem virtuale
+        let normalized_path = if dir_path == "/" || dir_path == "" {
+            "".to_string()
+        } else {
+            dir_path.trim_start_matches('/').trim_end_matches('/').to_string()
+        };
+
+        // Verifica esistenza nel filesystem virtuale
+        if !normalized_path.is_empty() && self.find(&normalized_path).is_none() {
+            return Err(format!("Directory '{}' not found", dir_path));
+        }
+
+        // Controlla se esiste nel database
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            if !normalized_path.is_empty() {
+                let mut exists_stmt = conn.prepare(
+                    "SELECT COUNT(*) FROM METADATA WHERE path = ?1 AND type = 1"
+                ).map_err(|e| format!("Database error: {}", e))?;
+                
+                let exists = exists_stmt.query_row(params![normalized_path], |row| {
+                    Ok(row.get::<_, i32>(0)? > 0)
+                }).map_err(|e| format!("Database error: {}", e))?;
+                
+                if !exists {
+                    return Err(format!("Directory '{}' not found", dir_path));
+                }
+            }
+        }
+
+        // Controlla se l'utente può accedere alla directory
+        if let Err(e) = self.check_dir_read_permission(dir_path, requesting_user_id) {
+            return Err(e);
+        }
+
         if let Some(ref db) = self.db_connection {
             let conn = db.lock().unwrap();
             
@@ -583,48 +696,37 @@ impl FileSystem {
                 let (path, user_id, user_perms, group_perms, others_perms, size, last_modified, username, file_type) = 
                     file_result.map_err(|e| e.to_string())?;
                 
-                let can_read = if user_id == requesting_user_id {
-                    // L'utente è il proprietario del file
-                    let owner_can_read = (user_perms & 4) != 0;  // Bit di lettura (r--)
-                    owner_can_read
+                // Filtra i file che sono direttamente nella directory target
+                let should_include = if normalized_dir.is_empty() {
+                    // Nella root ('') o ('/'): includi file senza slash nel nome
+                    !path.contains('/')
                 } else {
-                    // L'utente NON è il proprietario, usa permessi "others"
-                    let others_can_read = (others_perms & 4) != 0;  // Bit di lettura (r--)
-                    others_can_read
+                    // In sottodirectory: path deve iniziare con "dir/" e non avere altri slash dopo
+                    let dir_with_slash = format!("{}/", normalized_dir);
+                    path.starts_with(&dir_with_slash) && 
+                    path[dir_with_slash.len()..].chars().filter(|&c| c == '/').count() == 0
                 };
                 
-                if can_read {
-                    // ✅ FIX: Filtra i file che sono direttamente nella directory target
-                    let should_include = if normalized_dir.is_empty() {
-                        // Nella root ('') o ('/'): includi file senza slash nel nome
-                        !path.contains('/')
-                    } else {
-                        // In sottodirectory: path deve iniziare con "dir/" e non avere altri slash dopo
-                        let dir_with_slash = format!("{}/", normalized_dir);
-                        path.starts_with(&dir_with_slash) && 
-                        path[dir_with_slash.len()..].chars().filter(|&c| c == '/').count() == 0
-                    };
+                if should_include {
+                    let file_name = path.split('/').last().unwrap_or("").to_string();
+                    let is_directory = file_type == 1;  // 1 = directory, 0 = file
                     
-                    if should_include {
-                        let file_name = path.split('/').last().unwrap_or("").to_string();
-                        let is_directory = file_type == 1;  // 1 = directory, 0 = file
-                        
-                        let permissions = Self::format_permissions(user_perms, group_perms, others_perms, is_directory);
-                        let formatted_time = Self::format_timestamp(&last_modified);
-                        let owner = username.unwrap_or_else(|| format!("user{}", user_id));
-                        
-                        let file_info = FileInfo::new(
-                            permissions,
-                            owner,
-                            size,
-                            formatted_time,
-                            file_name.clone(),
-                            is_directory,
-                        );
-                        
-                        file_infos.push(file_info);
-                    }
+                    let permissions = Self::format_permissions(user_perms, group_perms, others_perms, is_directory);
+                    let formatted_time = Self::format_timestamp(&last_modified);
+                    let owner = username.unwrap_or_else(|| format!("user{}", user_id));
+                    
+                    let file_info = FileInfo::new(
+                        permissions,
+                        owner,
+                        size,
+                        formatted_time,
+                        file_name.clone(),
+                        is_directory,
+                    );
+                    
+                    file_infos.push(file_info);
                 }
+                
             }
             
             Ok(file_infos)
