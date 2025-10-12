@@ -49,6 +49,7 @@ async fn main()-> SqlResult<()> {
         .route("/list/*path", get(list_dir))
         .route("/files/*path", get(read_file).put(write_file).delete(delete_file))
         .route("/mkdir/*path", post(mkdir))
+        .route("/lookup/*path", get(lookup_item))
         
         // Stato condiviso
         .with_state(state);
@@ -321,5 +322,51 @@ async fn mkdir(
         Err(e) if e.contains("already exists") => (StatusCode::CONFLICT, e).into_response(),
         Err(e) if e.contains("Permission denied") => (StatusCode::FORBIDDEN, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn lookup_item(
+    State(app_state): State<AppState>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth_service = &app_state.auth_service;
+
+    let (_username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
+        Ok((user, id)) => {
+            println!("✅ Authenticated user: {} (id: {})", user, id);
+            (user, id)
+        },
+        Err(e) => {
+            println!("❌ Authentication failed: {}", e);
+            return (StatusCode::UNAUTHORIZED, e).into_response();
+        },
+    };
+
+    let guard = app_state.filesystem.lock().unwrap();
+    let fs = match guard.as_ref() {
+        Some(fs) => fs,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
+    };
+
+    println!("🔍 Looking up item: '{}' for user {}", path, user_id);
+
+    match fs.lookup_item(&path, user_id as i64) {
+        Ok(file_info) => {
+            println!("✅ Lookup successful for '{}'", path);
+            Json(file_info).into_response()
+        },
+        Err(e) if e.contains("not found") => {
+            println!("❌ Item not found: {}", e);
+            (StatusCode::NOT_FOUND, e).into_response()
+        },
+        Err(e) if e.contains("Permission denied") => {
+            println!("❌ Permission denied: {}", e);
+            (StatusCode::FORBIDDEN, e).into_response()
+        },
+        Err(e) => {
+            println!("❌ Error during lookup: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
     }
 }

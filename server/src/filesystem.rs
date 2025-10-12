@@ -735,6 +735,95 @@ impl FileSystem {
         }
     }
 
+    pub fn lookup_item(&self, item_path: &str, requesting_user_id: i64) -> Result<FileInfo, String> {
+        // Normalizza il path
+        let normalized_path = if item_path == "/" || item_path == "" {
+            "".to_string()
+        } else {
+            item_path.trim_start_matches('/').trim_end_matches('/').to_string()
+        };
+
+        // Verifica che l'item esista nel filesystem virtuale
+        if !normalized_path.is_empty() && self.find(&normalized_path).is_none() {
+            return Err(format!("Item '{}' not found", item_path));
+        }
+
+        if let Some(ref db) = self.db_connection {
+            let conn = db.lock().unwrap();
+            
+            // Query per ottenere i metadati dell'item specifico
+            let mut stmt = conn.prepare(
+                "SELECT m.path, m.user_id, m.user_permissions, m.group_permissions, m.others_permissions, 
+                        m.size, m.last_modified, u.Username, m.type
+                FROM METADATA m 
+                LEFT JOIN USER u ON m.user_id = u.User_ID 
+                WHERE m.path = ?1"
+            ).map_err(|e| format!("Database error: {}", e))?;
+            
+            let result = stmt.query_row(params![normalized_path], |row| {
+                let path: String = row.get(0)?;
+                let user_id: i64 = row.get(1)?;
+                let user_perms: u32 = row.get(2)?;
+                let group_perms: u32 = row.get(3)?;
+                let others_perms: u32 = row.get(4)?;
+                let size: i64 = row.get(5)?;
+                let last_modified: String = row.get(6)?;
+                let username: Option<String> = row.get(7)?;
+                let file_type: i32 = row.get(8)?;
+                
+                Ok((path, user_id, user_perms, group_perms, others_perms, size, last_modified, username, file_type))
+            });
+
+            match result {
+                Ok((path, user_id, user_perms, group_perms, others_perms, size, last_modified, username, file_type)) => {
+                    let is_directory = file_type == 1;
+                    let file_name = path.split('/').last().unwrap_or("").to_string();
+                    
+                    // ✅ CONTROLLA: Permessi di lettura sull'item
+                    let can_read_item = if user_id == requesting_user_id {
+                        (user_perms & 4) != 0  // Owner read permission
+                    } else {
+                        (others_perms & 4) != 0  // Others read permission
+                    };
+                    
+                    // ✅ COMPORTAMENTO: Mostra l'item sempre, ma nascondi dettagli se non leggibile
+                    let (permissions, display_size, display_owner, formatted_time) = if can_read_item {
+                        // Item leggibile: mostra tutti i dettagli
+                        let permissions = Self::format_permissions(user_perms, group_perms, others_perms, is_directory);
+                        let owner = username.unwrap_or_else(|| format!("user{}", user_id));
+                        let formatted_time = Self::format_timestamp(&last_modified);
+                        (permissions, size, owner, formatted_time)
+                    } else {
+                        // Item NON leggibile: mostra solo nome e tipo, resto nascosto
+                        let permissions = if is_directory { "d?????????" } else { "-?????????" }.to_string();
+                        ("?".to_string(), 0, "?".to_string(), "??? ?? ??:??".to_string())
+                    };
+                    
+                    let file_info = FileInfo::new(
+                        permissions,
+                        display_owner,
+                        display_size,
+                        formatted_time,
+                        file_name,
+                        is_directory,
+                    );
+                    
+                    println!("✅ Lookup successful for '{}' by user {}", item_path, requesting_user_id);
+                    Ok(file_info)
+                },
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    // Item non trovato nel database
+                    Err(format!("Item '{}' not found", item_path))
+                },
+                Err(e) => {
+                    Err(format!("Database error: {}", e))
+                }
+            }
+        } else {
+            Err("Database connection not initialized".to_string())
+        }
+    }
+
     pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String>{
         // Find the parent directory
         let node = self.find(path).ok_or_else(|| format!("Directory {} not found", path))?;
