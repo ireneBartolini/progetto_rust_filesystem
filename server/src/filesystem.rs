@@ -317,7 +317,7 @@ impl FileSystem {
                 Ok((owner_id, user_perms, group_perms, others_perms, file_type)) => {
                     // Verifica che sia una directory
                     if file_type != 1 {
-                        return Err(format!("'{}' is not a directory", dir_path));
+                        return Err(format!("Invalid request: '{}' is not a directory", dir_path));
                     }
 
                     // Controlla permessi di scrittura (bit 2 = write permission)
