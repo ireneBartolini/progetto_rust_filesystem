@@ -19,17 +19,19 @@ struct LoginResponse {
     token: String,
 }
 
-#[derive(Serialize)]
-struct WriteRequest<'a> {
-    path: String,
-    data: &'a [u8],
-}
+// #[derive(Serialize)]
+// struct WriteRequest<'a> {
+//     path: String,
+//     data: &'a [u8],
+// }
 
 struct RemoteFS {
     base_url: String,
     token: String,
     inode_to_path: HashMap<u64, String>,
+    path_to_parent: HashMap<String, u64>,
     next_ino: u64,
+
 }
 
 impl RemoteFS {
@@ -37,10 +39,12 @@ impl RemoteFS {
         let mut map = HashMap::new();
         // La root (ino = 1)
         map.insert(1, "/".to_string());
+        let mut map_parent = HashMap::new();
         Self {
             base_url,
             token,
             inode_to_path: map,
+            path_to_parent: map_parent,
             next_ino: 2,
         }
     }
@@ -52,6 +56,14 @@ impl RemoteFS {
         let ino = self.next_ino;
         self.next_ino += 1;
         self.inode_to_path.insert(ino, path.to_string());
+
+        // registra il parent
+        if let Some(parent_path) = path.rsplit_once('/') {
+            let parent = parent_path.0;
+            if let Some((&parent_ino, _)) = self.inode_to_path.iter().find(|(_, p)| p.as_str() == parent) {
+                self.path_to_parent.insert(path.to_string(), parent_ino);
+             }
+        }
         ino
     }
 
@@ -65,6 +77,14 @@ impl RemoteFS {
         }else{
             return None;
         }
+    }
+
+    fn join_path(parent: &str, name: &str) -> String {
+    if parent == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", parent, name)
+    }
     }
     
 }
@@ -319,7 +339,7 @@ impl Filesystem for RemoteFS {
             }
         };
 
-        println!("execute list {}", path);
+        println!("readdir(ino={}, path={})",ino, path);
         let client = Client::new();
         let token = self.token.clone();
         let base_url = self.base_url.clone();
@@ -355,12 +375,22 @@ impl Filesystem for RemoteFS {
         });
 
     let mut i = offset;
+
         if i == 0 {
-            let _= reply.add(1, 1, FileType::Directory, ".");
-            i += 1;
-            let _= reply.add(1, 2, FileType::Directory, "..");
-            i += 1;
+            let current_ino = ino;
+            let _ = reply.add(current_ino, 1, FileType::Directory, ".");
+
+            // trova il parent
+            let parent_ino = if current_ino == 1 {
+                1 // root: parent == self
+            } else {
+                let path = self.get_path(current_ino).unwrap();
+                *self.path_to_parent.get(&path).unwrap_or(&1)
+            };
+
+            let _ = reply.add(parent_ino, 2, FileType::Directory, "..");
         }
+
 
         for (idx, name) in files.iter().enumerate().skip((i - 2) as usize) {
             let next_offset = (idx as i64) + 3; // offset successivo
@@ -540,6 +570,8 @@ impl Filesystem for RemoteFS {
 
 
 fn ensure_unmounted(mountpoint: &str) {
+// let _ = fs::remove_dir_all(mountpoint);
+// let _ = fs::create_dir_all(mountpoint);
     let status = Command::new("fusermount3")
         .arg("-u")
         .arg(mountpoint)

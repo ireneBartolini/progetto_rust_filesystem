@@ -151,5 +151,9 @@ COSE DA FARE
 - sistemare i path <- funziona lo stesso ma ci sono 2 // all'inizio
 - sistemare la write di un file già esistenete <- penso sia un problema di attributi che la fopen dovrebbe verificare
 - fare un file a parte con il RemoteFS per rendere tutto più ordinato
-- finire le altre funzioni: mkdir e delete 
-- cd va implementata?
+- cd va implementata? NAVIGARE il fs in generale
+- problema se faccio login con un altro utente il mount non si "svuota" le cartelle restano 
+
+PROBLEMI 
+- cd e cd .. ora funziona però non riesce a fare ls sulla nuova current_dir
+- se faccio ls child funziona ma poi faccio ls di nuovo la nuova root è diventata child
