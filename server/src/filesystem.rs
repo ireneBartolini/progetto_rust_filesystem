@@ -280,10 +280,11 @@ impl FileSystem {
     // check if a user has the write permissions in a dir
     fn check_dir_write_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
         // Normalizza il path
-        let normalized_path = if dir_path == "/" || dir_path == "" {
+        let normalized_path = if (dir_path == "/" || dir_path == "") {
             return Ok(())       // In the root we always have write permissions
         } else {
             dir_path.trim_start_matches('/').trim_end_matches('/').to_string()
+            
         };
 
         println!("🔐 Checking write permission for user {} in directory '{}'", user_id, normalized_path);
@@ -665,10 +666,11 @@ impl FileSystem {
                         m.size, m.last_modified, u.Username, m.type
                 FROM METADATA m 
                 LEFT JOIN USER u ON m.user_id = u.User_ID 
-                WHERE m.path LIKE ?1
+                WHERE m.path LIKE ?1 
+                AND m.user_id = ?2 
                 ORDER BY m.path"
             ).map_err(|e| e.to_string())?;
-            
+            //aggiunto il vincolo sull'autore se no restituisce i file di altri utenti
             // like patern
             let like_pattern = if normalized_dir == "/" {
                 "%".to_string()  // Tutti i file nella root
@@ -676,7 +678,7 @@ impl FileSystem {
                 format!("{}%", normalized_dir)  // File nelle sottodirectory
             };
             
-            let file_iter = stmt.query_map(params![like_pattern], |row| {
+            let file_iter = stmt.query_map(params![like_pattern, requesting_user_id], |row| {
                 let path: String = row.get(0)?;
                 let user_id: i64 = row.get(1)?;
                 let user_perms: u32 = row.get(2)?;
@@ -745,7 +747,7 @@ impl FileSystem {
 
         // Verifica che l'item esista nel filesystem virtuale
         if !normalized_path.is_empty() && self.find(&normalized_path).is_none() {
-            return Err(format!("Item '{}' not found", item_path));
+            return Err(format!("Item '{}' not found in fs tree", item_path));
         }
 
         if let Some(ref db) = self.db_connection {
@@ -827,6 +829,7 @@ impl FileSystem {
     pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String>{
         // Find the parent directory
         let node = self.find(path).ok_or_else(|| format!("Directory {} not found", path))?;
+        
 
         // Check that it is a directory and that no child with the same name already exists
         {
@@ -869,9 +872,12 @@ impl FileSystem {
 
     // this is the version of the make_dir function that also updates the metadat inside the databse (so the one called by main.rs)
     pub fn make_dir_metadata(&mut self, path: &str, name: &str, user_id: i64, permissions: &str) -> Result<(), String> {
+        
+        if  path.trim()!="" && path.trim()!=("/"){
         // Verifica che l'utente abbia permessi di scrittura nella directory parent
-        if let Err(e) = self.check_dir_write_permission(path, user_id) {
-            return Err(e);
+            if let Err(e) = self.check_dir_write_permission(path, user_id) {
+                return Err(e);
+            }
         }
         
         // Permessi da stringa ottale a numero
@@ -1220,15 +1226,22 @@ impl FileSystem {
                                                     .map_err(|e| e.to_string())?;
                         file.write_all(content.as_bytes()).map_err(|e| e.to_string())?;*/
 
-                        println!("File already existing");
+                        println!("File already existing {}", path);
 
                         if let Some(ref db) = self.db_connection {
                             let conn = db.lock().unwrap();
                             let now = chrono::Utc::now().to_rfc3339();
                             
+                            let normalized_path = if path == "/" || path == "" {
+                                "".to_string()
+                            } else {
+                                path.trim_start_matches('/').trim_end_matches('/').to_string()
+                            };
+
+                            println!("UPDATE DB on file '{}'", normalized_path);
                             let result = conn.execute(
                                 "UPDATE METADATA SET size = ?1, last_modified = ?2 WHERE path = ?3",
-                                params![content_size, now, path],
+                                params![content_size, now, normalized_path], //real_path?
                             );
                             
                             if let Err(e) = result {
@@ -1276,11 +1289,17 @@ impl FileSystem {
                             let group_perms = (permissions_octal >> 3) & 0o7;
                             let others_perms = permissions_octal & 0o7;
                             
+                            let normalized_path = if path == "/" || path == "" {
+                                "".to_string()
+                            } else {
+                                path.trim_start_matches('/').trim_end_matches('/').to_string()
+                            };
+
                             let result = conn.execute(
                                 "INSERT INTO METADATA (path, user_id, user_permissions, group_permissions, others_permissions, size, created_at, last_modified, type)
                                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                                 params![
-                                    path,
+                                    normalized_path,
                                     user_id,
                                     user_perms,
                                     group_perms,

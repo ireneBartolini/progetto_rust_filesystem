@@ -25,6 +25,18 @@ struct LoginResponse {
 //     data: &'a [u8],
 // }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub permissions: String,        // es: "drwxr-xr-x", "-rw-r--r--"
+    pub links: u32,                 // always 1
+    pub owner: String,              // owner username
+    pub group: String,              // group (always users)
+    pub size: u64,                  // dimension in bytes
+    pub modified: String,           // last modifiied date
+    pub name: String,               // name of the file/directory
+    pub is_directory: bool,         // flag to identify wether it is a directory or not
+}
+
 struct RemoteFS {
     base_url: String,
     token: String,
@@ -38,7 +50,7 @@ impl RemoteFS {
     fn new(base_url: String, token: String) -> Self {
         let mut map = HashMap::new();
         // La root (ino = 1)
-        map.insert(1, "/".to_string());
+        map.insert(1, "".to_string());
         let mut map_parent = HashMap::new();
         Self {
             base_url,
@@ -289,34 +301,91 @@ impl Filesystem for RemoteFS {
     }
 
     fn getattr(&mut self, _: &Request, ino: u64, _: Option<u64>, reply: ReplyAttr) {
-        println!("getattr(ino={})", ino);
         
-        let ts = SystemTime::now();
-        let (kind, perm, size, nlink) = if ino == 1 {
-            (FileType::Directory, 0o755, 0, 2)
-        } else {
-            (FileType::RegularFile, 0o644, 128, 1)
-        };
+        let path= self.get_path(ino).unwrap();
+        println!("getattr(ino={}, path={})", ino, path);
 
-        let attr = FileAttr {
-            ino,
-            size,
-            blocks: 1,
-            atime: ts,
-            mtime: ts,
-            ctime: ts,
-            crtime: ts,
-            kind,
-            perm,
-            nlink,
-            uid: 1000,
-            gid: 1000,
-            rdev: 0,
-            flags: 0,
-            blksize: 512,
-        };
+        if ino==1{
+            let ts = SystemTime::now();
+            let attr = FileAttr {
+                ino,
+                size: 0,
+                blocks: 1,
+                atime: ts,
+                mtime: ts,
+                ctime: ts,
+                crtime: ts,
+                kind: FileType::Directory,
+                perm:  0o755,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+                };
+                reply.attr(&Duration::new(1, 0), &attr);
 
-        reply.attr(&Duration::new(1, 0), &attr);
+        }else{
+
+        //API CALL
+        let client = Client::new();
+        let token = self.token.clone();
+        let base_url = self.base_url.clone();
+        task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let resp = client
+                    .get(format!("{}/lookup/{}", base_url, path)) // path già con /
+                    .bearer_auth(token)
+                    .send()
+                    .await;
+
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        println!("risposta corretta");
+                        match r.json::<FileInfo>().await {
+                            Ok(obj) => {
+                                println!("json {:?}", obj);
+
+                                let (kind, perm) = if obj.is_directory {
+                                    (FileType::Directory, 0o755)
+                                } else {
+                                   (FileType::RegularFile, 0o644)
+                                };
+
+                                let ino = self.register_path(&path);
+
+                                let ts = SystemTime::now();
+                                let attr = FileAttr {
+                                    ino,
+                                    size: obj.size,
+                                    blocks: 1,
+                                    atime: ts,
+                                    mtime: ts,
+                                    ctime: ts,
+                                    crtime: ts,
+                                    kind,
+                                    perm,
+                                    nlink: 1,
+                                    uid: 1000,
+                                    gid: 1000,
+                                    rdev: 0,
+                                    flags: 0,
+                                    blksize: 512,
+                                };
+                                reply.attr(&Duration::new(1, 0), &attr);
+                            }
+                            Err(_) => reply.error(ENOENT),
+                        }
+                }
+                _ => reply.error(ENOENT),
+            }
+                
+            })
+        });
+    }
+    
     }
 
 
@@ -329,7 +398,6 @@ impl Filesystem for RemoteFS {
         offset: i64, 
         mut reply: 
         ReplyDirectory) {
-        println!("readdir(ino={}, offset={})", ino, offset);
 
         let path = match self.get_path(ino) {
             Some(p) => p.clone(),
@@ -337,14 +405,15 @@ impl Filesystem for RemoteFS {
                 reply.error(ENOENT);
                 return;
             }
-        };
+        };    
+        println!("readdir(ino={}, offset={}, path={})", ino, offset, path);
 
-        println!("readdir(ino={}, path={})",ino, path);
+    
         let client = Client::new();
         let token = self.token.clone();
         let base_url = self.base_url.clone();
 
-        let files: Vec<String> =task::block_in_place(|| {
+        let files: Vec<FileInfo> =task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let resp = client
@@ -355,13 +424,13 @@ impl Filesystem for RemoteFS {
 
                     match resp {
                     Ok(r) if r.status().is_success() =>{
-                        let v= r.json().await;
+                        let v= r.json::<Vec<FileInfo>>().await;
                         let res;
                         //DEbug!
                         match v{
-                            Ok(obj)=>{println!("json {:?}", obj); res=obj;
-    
-                            
+                            Ok(obj)=>{
+                                //println!("json {:?}", obj); 
+                                res=obj;
                             },
                             Err(_)=>{res=Vec::new();}
                         }
@@ -392,17 +461,19 @@ impl Filesystem for RemoteFS {
         }
 
 
-        for (idx, name) in files.iter().enumerate().skip((i - 2) as usize) {
+        for (idx, item) in files.iter().enumerate().skip((i - 2) as usize) {
+            let name= item.name.clone();
+            let kind;
+            if item.is_directory{
+                kind=FileType::Directory;
+            }else{
+                kind=FileType::RegularFile;
+            }
             let next_offset = (idx as i64) + 3; // offset successivo
             let full_path = format!("{}/{}", path, name);
             let _= self.register_path(&full_path);
-            let kind;
-            if name.contains(".txt"){
-                kind=FileType::RegularFile;
-            }else{
-                kind=FileType::Directory;
-            }
-            let _ =reply.add((idx as u64) + 2, next_offset, kind, OsStr::new(name));
+            
+            let _ =reply.add((idx as u64) + 2, next_offset, kind, OsStr::new(&name));
         }
 
         reply.ok();
@@ -417,60 +488,92 @@ impl Filesystem for RemoteFS {
         name: &OsStr,
         reply: ReplyEntry,
     ) {
-    //DUMMY FUNCTION new server api needed
-    println!("lookup(parent={}, name={:?})", parent, name);
-    let parent_path= self.get_path(parent).unwrap();
-    let real_path= parent_path.to_owned()+"/"+name.to_str().unwrap();
-    let opt_ino= self.exist_path(&real_path);
-    match opt_ino{
-        Some(ino)=>{
-            let kind;
-            let perm;
-            let size;
-            if name.to_str().unwrap().contains(".txt"){
-                kind=FileType::RegularFile;
-                size=128;
-                perm=0o644;
-            }else{
-                kind=FileType::Directory;
-                size=0;
-                perm=0o755;
-            }
-            
-            let ts = SystemTime::now();
-            let attr = FileAttr {
-                    ino, 
-                    size,
-                    blocks: 1,
-                    atime: ts,
-                    mtime: ts,
-                    ctime: ts,
-                    crtime: ts,
-                    kind,
-                    perm,
-                    nlink: 1,
-                    uid: 1000,
-                    gid: 1000,
-                    rdev: 0,
-                    flags: 0,
-                    blksize: 512,
+    
+        let parent_path= self.get_path(parent).unwrap();
+        let path = if parent_path == "/" {
+            format!("/{}", name.to_str().unwrap())
+        } else {
+            format!("{}/{}", parent_path, name.to_str().unwrap())
+        };
+
+            // ignora lookup spurie (es: echo, total, ecc.)
+        if !name.to_str().unwrap().contains('.') && !name.to_str().unwrap().starts_with("child") {
+           // println!("Ignoro lookup spurio su {:?}", name);
+            reply.error(ENOENT);
+            return;
+        }
+
+        println!("lookup(parent={}, name={:?})", parent, name);
+      
+        //API CALL
+        let client = Client::new();
+        let token = self.token.clone();
+        let base_url = self.base_url.clone();
+        let res: Option<FileInfo>= task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let resp = client
+                    .get(format!("{}/lookup/{}", base_url, path)) // path già con /
+                    .bearer_auth(token)
+                    .send()
+                    .await;
+
+                match resp {
+                    Ok(r) if r.status().is_success() => r.json::<FileInfo>().await.ok(),
+                    _ => None,
+                }
+            })
+        });
+    
+    // ora rispondi fuori dal contesto async
+    match res {
+        Some(obj) => {
+           // println!("json {:?}", obj);
+
+            let (kind, perm) = if obj.is_directory {
+                (FileType::Directory, 0o755)
+            } else {
+                (FileType::RegularFile, 0o644)
             };
 
-            // TTL di 1 secondo
-            reply.entry(&Duration::new(1, 0), &attr, 0);
-        },
-        None=>{
+            let ino = self.register_path(&path);
+            let ts = SystemTime::now();
+            let attr = FileAttr {
+                ino,
+                size: obj.size,
+                blocks: 1,
+                atime: ts,
+                mtime: ts,
+                ctime: ts,
+                crtime: ts,
+                kind,
+                perm,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+
+            reply.entry(&Duration::new(10, 0), &attr, 0);
+        }
+        None => {
+            println!("lookup fallita per {}", path);
             reply.error(ENOENT);
         }
     }
+
     
-   
     }
 
 //DUMMY FUNCTION FOR FUSE
-    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         println!("open(ino={})", ino);
-        reply.opened(ino, 0); // successo, nessun handle particolare
+        if flags & libc::O_WRONLY != 0 || flags & libc::O_RDWR != 0 {
+        println!("--> opening file for write");
+    }
+    reply.opened(0, 0); // handle fittizio = 0, flags = 0
     }
 
     // fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {

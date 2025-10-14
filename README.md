@@ -20,10 +20,19 @@ Read files from the remote server
 # Server Interface and Implementation 
 - The server should offer a set RESTful API for file operations:
 GET /list/<path> – List directory contents
+responce json let file_info = FileInfo::new(
+                        permissions,
+                        owner,
+                        size,
+                        formatted_time,
+                        file_name.clone(),
+                        is_directory,
+                    );
 GET /files/<path> – Read file contents
 PUT /files/<path> – Write file contents
 POST /mkdir/<path> – Create directory
 DELETE /files/<path> – Delete file or directory
+GET /lookup/<path>
 - The server can be implemented using any language or framework, but should be RESTful and stateless.
 
 # Caching
@@ -155,5 +164,7 @@ COSE DA FARE
 - problema se faccio login con un altro utente il mount non si "svuota" le cartelle restano 
 
 PROBLEMI 
-- cd e cd .. ora funziona però non riesce a fare ls sulla nuova current_dir
-- se faccio ls child funziona ma poi faccio ls di nuovo la nuova root è diventata child
+
+- SERVER se ci sono le cartelle già presenti il server quando fa il mount non scrive i file coi permessi nel db e non funzionano
+- SERVER la mkdir in route non funziona "" (guardare come fa la write file che quella funziona)
+- CLIENT non si può modificare un file esistente 

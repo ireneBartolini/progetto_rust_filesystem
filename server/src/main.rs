@@ -353,7 +353,7 @@ async fn lookup_item(
 
     match fs.lookup_item(&path, user_id as i64) {
         Ok(file_info) => {
-            println!("✅ Lookup successful for '{}'", path);
+            println!("✅ Lookup successful for '{}' file info: {:?}", path, Json(file_info.clone()));
             Json(file_info).into_response()
         },
         Err(e) if e.contains("not found") => {
