@@ -157,14 +157,17 @@ create	crea solo inode fittizio	non fare nulla sul server
 3. getattr	restituisci attributi 
 
 COSE DA FARE 
-- sistemare i path <- funziona lo stesso ma ci sono 2 // all'inizio
 - sistemare la write di un file già esistenete <- penso sia un problema di attributi che la fopen dovrebbe verificare
 - fare un file a parte con il RemoteFS per rendere tutto più ordinato
-- cd va implementata? NAVIGARE il fs in generale
+- cd va implementata? NAVIGARE il fs in generale 
 - problema se faccio login con un altro utente il mount non si "svuota" le cartelle restano 
 
 PROBLEMI 
 
 - SERVER se ci sono le cartelle già presenti il server quando fa il mount non scrive i file coi permessi nel db e non funzionano
-- SERVER la mkdir in route non funziona "" (guardare come fa la write file che quella funziona)
 - CLIENT non si può modificare un file esistente 
+
+COME TESTARE:
+**/server cargo run 
+**/client cargo run 
+**/client/mount <op. filesystem>
