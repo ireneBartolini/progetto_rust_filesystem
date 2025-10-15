@@ -1,12 +1,37 @@
 
 use serde::{Deserialize, Serialize};
+use users::mock::MockUsers;
 use std::io::{self, Write};
 use rpassword::read_password;
 use libc::ENOENT;
 use reqwest::Client;
 use std::collections::HashMap;
-use libc::ENOSYS;
 use libc::EIO;
+use chrono::{DateTime, Utc};
+use std::time::{ UNIX_EPOCH};
+use users::{get_user_by_name, get_current_uid, get_current_gid};
+use std::process::Command;
+use tokio::task;
+use fuser::{FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request};
+use std::time::{Duration, SystemTime};
+use std::ffi::OsStr;
+// pub struct FileAttr {
+//     pub ino: u64,          // ID univoco del file nel filesystem (inode number)
+//     pub size: u64,         // Dimensione in byte del file (0 per directory)
+//     pub blocks: u64,       // Numero di blocchi allocati (inutile: metti 0 o size/512)
+//     pub atime: SystemTime, // Access time: ultima lettura del file
+//     pub mtime: SystemTime, // Modification time: ultima modifica del contenuto
+//     pub ctime: SystemTime, // Change time: ultima modifica ai metadati (permessi, owner)
+//     pub crtime: SystemTime,// Creation time (non sempre usato)
+//     pub kind: FileType,    // Tipo (FileType::RegularFile o FileType::Directory)
+//     pub perm: u16,         // Permessi in ottale (es: 0o755, 0o644)
+//     pub nlink: u32,        // Numero di hard link (per file singoli = 1)
+//     pub uid: u32,          // ID utente proprietario
+//     pub gid: u32,          // ID gruppo proprietario
+//     pub rdev: u32,         // Solo per device speciali (0 per file normali)
+//     pub flags: u32,        // Flag kernel (lascia 0)
+//     pub blksize: u32,      // Dimensione blocco (512 o 4096)
+// }
 
 #[derive(Serialize)]
 struct LoginRequest {
@@ -19,11 +44,6 @@ struct LoginResponse {
     token: String,
 }
 
-// #[derive(Serialize)]
-// struct WriteRequest<'a> {
-//     path: String,
-//     data: &'a [u8],
-// }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -37,27 +57,37 @@ pub struct FileInfo {
     pub is_directory: bool,         // flag to identify wether it is a directory or not
 }
 
+fn parse_time(s: &str) -> SystemTime {
+    match DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp() as u64),
+        Err(_) => SystemTime::now(),
+    }
+}
+
 struct RemoteFS {
     base_url: String,
     token: String,
     inode_to_path: HashMap<u64, String>,
     path_to_parent: HashMap<String, u64>,
     next_ino: u64,
-
+    uid: u32,
+    gid: u32,
 }
 
 impl RemoteFS {
-    fn new(base_url: String, token: String) -> Self {
+    fn new(base_url: String, token: String, uid: u32, gid: u32) -> Self {
         let mut map = HashMap::new();
         // La root (ino = 1)
         map.insert(1, "".to_string());
-        let mut map_parent = HashMap::new();
+        let map_parent = HashMap::new();
         Self {
             base_url,
             token,
             inode_to_path: map,
             path_to_parent: map_parent,
             next_ino: 2,
+            uid,
+            gid
         }
     }
     
@@ -85,9 +115,9 @@ impl RemoteFS {
 
     fn exist_path(&mut self, path: &str)-> Option<u64>{
         if let Some((&ino, _)) = self.inode_to_path.iter().find(|(_, p)| p.as_str() == path) {
-            return Some(ino);
+            Some(ino)
         }else{
-            return None;
+            None
         }
     }
 
@@ -101,11 +131,6 @@ impl RemoteFS {
     
 }
 
-use tokio::task;
-
-use fuser::{FileAttr, FileType, Filesystem, Request, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyWrite, ReplyEntry, ReplyEmpty, ReplyOpen};
-use std::time::{Duration, SystemTime};
-use std::ffi::OsStr;
 
 impl Filesystem for RemoteFS {
     fn mkdir(
@@ -170,8 +195,8 @@ impl Filesystem for RemoteFS {
             kind: FileType::Directory,
             perm: 0o755,
             nlink: 2,
-            uid: 1000,
-            gid: 1000,
+            uid: self.uid,
+            gid: self.gid,
             rdev: 0,
             flags: 0,
             blksize: 512,
@@ -239,8 +264,8 @@ impl Filesystem for RemoteFS {
                 kind: FileType::Directory,
                 perm:  0o755,
                 nlink: 1,
-                uid: 1000,
-                gid: 1000,
+                uid: self.uid,
+                gid: self.gid,
                 rdev: 0,
                 flags: 0,
                 blksize: 512,
@@ -277,20 +302,20 @@ impl Filesystem for RemoteFS {
 
                                 let ino = self.register_path(&path);
 
-                                let ts = SystemTime::now();
+                                let ts = parse_time(&obj.modified);
                                 let attr = FileAttr {
                                     ino,
                                     size: obj.size,
-                                    blocks: 1,
+                                    blocks: (obj.size / 512).max(1),
                                     atime: ts,
                                     mtime: ts,
                                     ctime: ts,
                                     crtime: ts,
                                     kind,
                                     perm,
-                                    nlink: 1,
-                                    uid: 1000,
-                                    gid: 1000,
+                                    nlink: obj.links,
+                                    uid: self.uid,
+                                    gid: self.gid,
                                     rdev: 0,
                                     flags: 0,
                                     blksize: 512,
@@ -346,25 +371,15 @@ impl Filesystem for RemoteFS {
                     match resp {
                     Ok(r) if r.status().is_success() =>{
                         let v= r.json::<Vec<FileInfo>>().await;
-                        let res;
-                        //DEbug!
-                        match v{
-                            Ok(obj)=>{
-                                //println!("json {:?}", obj); 
-                                res=obj;
-                            },
-                            Err(_)=>{res=Vec::new();}
-                        }
-                        res                       
-                    }
-                    ,
+                        v.unwrap_or(Vec::new())                   
+                    },
                     _ => Vec::new(),
                     }
                 
             })
         });
 
-    let mut i = offset;
+    let i = offset;
 
         if i == 0 {
             let current_ino = ino;
@@ -457,8 +472,7 @@ impl Filesystem for RemoteFS {
                 }
             })
         });
-    
-    // ora rispondi fuori dal contesto async
+
     match res {
         Some(obj) => {
            // println!("json {:?}", obj);
@@ -470,20 +484,20 @@ impl Filesystem for RemoteFS {
             };
 
             let ino = self.register_path(&path);
-            let ts = SystemTime::now();
+            let ts = parse_time(&obj.modified);
             let attr = FileAttr {
                 ino,
                 size: obj.size,
-                blocks: 1,
+                blocks: (obj.size / 512).max(1),
                 atime: ts,
                 mtime: ts,
                 ctime: ts,
                 crtime: ts,
                 kind,
                 perm,
-                nlink: 1,
-                uid: 1000,
-                gid: 1000,
+                nlink: obj.links,
+                uid: self.uid,
+                gid: self.gid,
                 rdev: 0,
                 flags: 0,
                 blksize: 512,
@@ -515,20 +529,20 @@ impl Filesystem for RemoteFS {
         let parent_path= self.get_path(parent).unwrap();
         let real_path= parent_path.to_owned()+"/"+name.to_str().unwrap();
         let ino= self.register_path(&real_path);
-        
+        let ts=SystemTime::now();
         let attr = FileAttr {
-            ino, // finto inode
+            ino, 
             size: 0,
             blocks: 0,
-            atime: SystemTime::now(),
-            mtime: SystemTime::now(),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
+            atime: ts,
+            mtime: ts,
+            ctime: ts,
+            crtime: ts,
             kind: FileType::RegularFile,
             perm: 0o644,
             nlink: 1,
-            uid: 1000,
-            gid: 1000,
+            uid: self.uid,
+            gid: self.gid,
             rdev: 0,
             flags: 0,
             blksize: 512,
@@ -537,6 +551,7 @@ impl Filesystem for RemoteFS {
         // Non crea davvero nulla, ma fa contento il kernel
         reply.created(&Duration::new(1, 0), &attr, 0, 0, 0);
     }
+
 //DUMMY FUNCTION FOR FUSE
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         println!("open(ino={})", ino);
@@ -614,7 +629,6 @@ impl Filesystem for RemoteFS {
         let client = Client::new();
         let token = self.token.clone();
         let base_url = self.base_url.clone();
-        let data_copy = data.to_vec();
         let body = String::from_utf8_lossy(data).to_string();
 
         let ok: bool = task::block_in_place(|| {
@@ -759,6 +773,35 @@ fn ensure_unmounted(mountpoint: &str) {
     }
 }
 
+// funzione per assicurare che l'utente locale esista
+fn ensure_local_user(username: &str) -> (u32, u32) {
+    if let Some(user) = get_user_by_name(username) {
+        // utente già esistente
+        (user.uid(), user.primary_group_id())
+    } else {
+        println!("⚠️ L'utente '{}' non esiste localmente, lo creo...", username);
+
+        // Creazione utente locale tramite `useradd`
+        // ATTENZIONE: richiede permessi sudo/root
+        let status = Command::new("sudo")
+            .arg("useradd")
+            .arg("-m") // crea anche la home
+            .arg(username)
+            .status()
+            .expect("Impossibile eseguire useradd");
+
+        if !status.success() {
+            panic!("Errore nella creazione dell'utente locale '{}'", username);
+        }
+
+        // Recupera i dati appena creati
+        let user = get_user_by_name(username)
+            .expect("Utente non trovato anche dopo la creazione!");
+
+        (user.uid(), user.primary_group_id())
+    }
+}
+
 
 
 #[tokio::main]
@@ -824,12 +867,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdout().flush()?;
     let password = read_password().unwrap();
 
+    let current_user= username.clone();
     let client = Client::new();
     let res = client.post("http://127.0.0.1:8080/auth/login")
         .json(&LoginRequest { username, password })
         .send()
         .await?;
         
+    
     let status= res.status();       
     if status.is_success() {
         println!("✅ Success Login");
@@ -837,10 +882,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let login_res: LoginResponse = body.await?;
         let token= login_res.token;
         println!("token: {}", token);
-        let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token);
+
+        // creao l'utente/restituisce uid e gid
+        let (uid, gid) = ensure_local_user(&current_user);
+        println!("Utente locale '{}' → UID={}, GID={}", current_user.clone(), uid, gid);
+        
+        let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token, uid, gid);
         let mountpoint = "/home/irene/progetto_rust_filesystem/client/mount";
         ensure_unmounted(mountpoint);
         println!("Mounting Remote FS at {}", mountpoint);
+        
+
+        // let options:[&OsStr; 3]  = [
+        //     OsStr::new("default_permissions"),
+        //     OsStr::new(&format!("user_id={}", uid)),
+        //     OsStr::new(&format!("group_id={}", gid)),
+        // ];
+        
         fuser::mount2(fs, mountpoint, &[])?;   
     } else {
         let text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
@@ -854,7 +912,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
    
 }
 
-use std::process::Command;
 
 impl Drop for RemoteFS {
     fn drop(&mut self) {
