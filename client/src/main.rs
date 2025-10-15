@@ -181,46 +181,6 @@ impl Filesystem for RemoteFS {
     }
 
 
-
-   // create dummy: è necessaria per FUSe ma non chiama nessuna API
-    fn create(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &std::ffi::OsStr,
-        _mode: u32,
-        _size: u32,
-        _flags: i32,
-        reply: ReplyCreate,
-    ) {
-        println!("CREATE called for {:?}", name);
-        let parent_path= self.get_path(parent).unwrap();
-        let real_path= parent_path.to_owned()+"/"+name.to_str().unwrap();
-        let ino= self.register_path(&real_path);
-        
-        let attr = FileAttr {
-            ino, // finto inode
-            size: 0,
-            blocks: 0,
-            atime: SystemTime::now(),
-            mtime: SystemTime::now(),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
-            kind: FileType::RegularFile,
-            perm: 0o644,
-            nlink: 1,
-            uid: 1000,
-            gid: 1000,
-            rdev: 0,
-            flags: 0,
-            blksize: 512,
-        };
-
-        // Non crea davvero nulla, ma fa contento il kernel
-        reply.created(&Duration::new(1, 0), &attr, 0, 0, 0);
-    }
-
-
     fn read(
         &mut self,
         _req: &Request<'_>,
@@ -255,45 +215,6 @@ impl Filesystem for RemoteFS {
                         let end = (offset as usize + size as usize).min(content.len());
                         reply.data(&content[start..end]);
                     }
-                    _ => reply.error(ENOENT),
-                }
-            });
-        });
-    }
-
-    fn write(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        _offset: i64,
-        data: &[u8],
-        _: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyWrite,
-    ) {
-        
-        let path = self.get_path(ino).unwrap();
-        println!("execute write {}", path);
-        let client = Client::new();
-        let token = self.token.clone();
-        let base_url = self.base_url.clone();
-        let data_copy = data.to_vec();
-        let body = String::from_utf8_lossy(data).to_string();
-
-        task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .put(format!("{}/files/{}", base_url, path))
-                    .bearer_auth(token)
-                    .body(body)
-                    .send()
-                    .await;
-
-                match resp {
-                    Ok(r) if r.status().is_success() => reply.written(data_copy.len() as u32),
                     _ => reply.error(ENOENT),
                 }
             });
@@ -506,7 +427,7 @@ impl Filesystem for RemoteFS {
             || name_str.eq_ignore_ascii_case("echo")
             || name_str.eq_ignore_ascii_case("cat")
             || name_str.eq_ignore_ascii_case("ls")
-            || name_str.eq_ignore_ascii_case("mkdir");
+            || name_str.eq_ignore_ascii_case("mkdir")
             || name_str.eq_ignore_ascii_case("rmdir");
 
         if is_spurious {
@@ -579,25 +500,162 @@ impl Filesystem for RemoteFS {
     
     }
 
+    // create dummy: è necessaria per FUSe ma non chiama nessuna API
+    fn create(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        _mode: u32,
+        _size: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        println!("CREATE called for {:?}", name);
+        let parent_path= self.get_path(parent).unwrap();
+        let real_path= parent_path.to_owned()+"/"+name.to_str().unwrap();
+        let ino= self.register_path(&real_path);
+        
+        let attr = FileAttr {
+            ino, // finto inode
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        };
+
+        // Non crea davvero nulla, ma fa contento il kernel
+        reply.created(&Duration::new(1, 0), &attr, 0, 0, 0);
+    }
 //DUMMY FUNCTION FOR FUSE
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         println!("open(ino={})", ino);
         if flags & libc::O_WRONLY != 0 || flags & libc::O_RDWR != 0 {
         println!("--> opening file for write");
-    }
+       
+        } 
+        println!("open flags: 0o{:o}", flags);
+
     reply.opened(0, 0); // handle fittizio = 0, flags = 0
     }
 
-    // fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-    //     println!("flush(ino={})", ino);
-    //     reply.ok(); // non serve fare nulla
-    // }
+    fn setattr(
+    &mut self,
+    _req: &Request<'_>,
+    ino: u64,
+    _mode: Option<u32>,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+    size: Option<u64>,
+    _atime: Option<fuser::TimeOrNow>,
+    _mtime: Option<fuser::TimeOrNow>,
+    _ctime: Option<SystemTime>,
+    _fh: Option<u64>,
+    _crtime: Option<SystemTime>,
+    _chgtime: Option<SystemTime>,
+    _bkuptime: Option<SystemTime>,
+    _flags: Option<u32>,
+    reply: ReplyAttr,
+    ) {
+        println!("setattr(ino={}, size={:?})", ino, size);
+    // Se viene richiesta una truncation, gestiscila (es. manda una chiamata al server)
+        if let Some(_new_size) = size {
+        // qui puoi chiamare l'API remota per troncare il file, oppure accettare e rispondere localmente
+        // per ora rispondiamo con attributi aggiornati (dummy)
+        
+        }
 
-    // fn release(&mut self, _req: &Request, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
-    //     println!("release(ino={})", ino);
+        let ts = SystemTime::now();
+        let attr = FileAttr {
+            ino,
+            size: size.unwrap_or(0),
+            blocks: 0,
+            atime: ts,
+            mtime: ts,
+            ctime: ts,
+            crtime: ts,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        };
+        reply.attr(&Duration::new(1,0), &attr);
+    }
 
-    //     reply.ok(); // idem
-    // }
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _offset: i64,
+        data: &[u8],
+        _: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        
+        let path = self.get_path(ino).unwrap();
+        println!("execute write {}", path);
+        let client = Client::new();
+        let token = self.token.clone();
+        let base_url = self.base_url.clone();
+        let data_copy = data.to_vec();
+        let body = String::from_utf8_lossy(data).to_string();
+
+        let ok: bool = task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let resp = client
+                    .put(format!("{}/files/{}", base_url, path))
+                    .bearer_auth(token)
+                    .body(body)
+                    .send()
+                    .await;
+
+                match resp {
+                    Ok(r) => r.status().is_success(),
+                    Err(_) => false,
+                }
+            })
+        });
+
+        if ok{
+            reply.written(data.len() as u32);
+        }else{
+            reply.error(EIO);
+        }
+    }
+
+    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        println!("flush(ino={})", ino);
+        reply.ok(); // non serve fare nulla
+    }
+
+    fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
+        println!("fsync(ino={}, fh={}, datasync={})", ino, fh, datasync);
+        reply.ok();
+    }
+
+    fn release(&mut self, _req: &Request, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+        println!("release(ino={})", ino);
+
+        reply.ok(); // idem
+    }
 
     
     fn unlink(
@@ -677,6 +735,8 @@ impl Filesystem for RemoteFS {
         });
     }
 
+
+    
 
     
 
