@@ -294,7 +294,7 @@ async fn mkdir(
         Ok((user, id)) => (user, id),
         Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
     };
-
+    println!("⛏🧱 Making dir: '{}' for user {}", path, user_id);
     // Leggi i permessi dalla query (default 755 per directory)
     let permissions = query.get("permissions").unwrap_or(&"755".to_string()).clone();
     
@@ -314,7 +314,7 @@ async fn mkdir(
     let path = StdPath::new(&path);
     let old_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("");
     let new_dir = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-
+    println!("parent: '{}', new dir: '{}'", old_dir, new_dir);
     match fs.make_dir_metadata(&format!("/{}", old_dir), new_dir, user_id as i64, &permissions) {
         Ok(_) => "Directory created successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),

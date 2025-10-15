@@ -616,7 +616,7 @@ impl FileSystem {
 
     pub fn list_contents_with_metadata(&self, dir_path: &str, requesting_user_id: i64) -> Result<Vec<FileInfo>, String> {
         //  todo: come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. o un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?
-        println!("❓come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. E un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?");
+       // println!("❓come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. E un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?");
 
         // Controlla se la directory esiste nel filesystem virtuale
         let normalized_path = if dir_path == "/" || dir_path == "" {
@@ -828,8 +828,13 @@ impl FileSystem {
 
     pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String>{
         // Find the parent directory
-        let node = self.find(path).ok_or_else(|| format!("Directory {} not found", path))?;
-        
+        //add the 
+        println!("make dir");
+        let node = if !path.is_empty() && path != "/" {
+            self.find(path).ok_or_else(|| format!("Directory {} not found", path))?
+        } else {
+            self.current.clone()
+        };
 
         // Check that it is a directory and that no child with the same name already exists
         {
@@ -873,20 +878,17 @@ impl FileSystem {
     // this is the version of the make_dir function that also updates the metadat inside the databse (so the one called by main.rs)
     pub fn make_dir_metadata(&mut self, path: &str, name: &str, user_id: i64, permissions: &str) -> Result<(), String> {
         
-        if  path.trim()!="" && path.trim()!=("/"){
+        if  path.is_empty() && path.trim()!=("/"){
         // Verifica che l'utente abbia permessi di scrittura nella directory parent
-            if let Err(e) = self.check_dir_write_permission(path, user_id) {
-                return Err(e);
-            }
+            self.check_dir_write_permission(path, user_id)?    
         }
         
         // Permessi da stringa ottale a numero
         let permissions_octal = u32::from_str_radix(permissions, 8)
             .map_err(|_| format!("Invalid permissions format: {}", permissions))?;
         
-        if let Err(e) = self.make_dir(path, name) {
-            return Err(e);
-        }
+        self.make_dir(path, name)?;
+        
 
         // path completo della directory (path + name)
         let full_path = if path == "/" {

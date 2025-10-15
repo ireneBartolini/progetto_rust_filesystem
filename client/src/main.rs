@@ -496,9 +496,21 @@ impl Filesystem for RemoteFS {
             format!("{}/{}", parent_path, name.to_str().unwrap())
         };
 
-            // ignora lookup spurie (es: echo, total, ecc.)
-        if !name.to_str().unwrap().contains('.') && !name.to_str().unwrap().starts_with("child") {
-           // println!("Ignoro lookup spurio su {:?}", name);
+        let name_str = name.to_str().unwrap_or("");
+
+        // escludi le lookup spurie di comandi tipo "echo", "total", "drwxr-xr-x", numeri, ecc.
+        //é 
+        let is_spurious = name_str.chars().all(|c| c.is_numeric())
+            || name_str.starts_with("drwx")
+            || name_str.eq_ignore_ascii_case("total")
+            || name_str.eq_ignore_ascii_case("echo")
+            || name_str.eq_ignore_ascii_case("cat")
+            || name_str.eq_ignore_ascii_case("ls")
+            || name_str.eq_ignore_ascii_case("mkdir");
+            || name_str.eq_ignore_ascii_case("rmdir");
+
+        if is_spurious {
+            println!("Ignoro lookup spurio su {:?}", name_str);
             reply.error(ENOENT);
             return;
         }
