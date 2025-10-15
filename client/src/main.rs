@@ -47,7 +47,7 @@ struct LoginResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
-    pub permissions: String,        // es: "drwxr-xr-x", "-rw-r--r--"
+    pub permissions: u16,       
     pub links: u32,                 // always 1
     pub owner: String,              // owner username
     pub group: String,              // group (always users)
@@ -294,10 +294,10 @@ impl Filesystem for RemoteFS {
                             Ok(obj) => {
                                 println!("json {:?}", obj);
 
-                                let (kind, perm) = if obj.is_directory {
-                                    (FileType::Directory, 0o755)
+                                let kind = if obj.is_directory {
+                                    FileType::Directory
                                 } else {
-                                   (FileType::RegularFile, 0o644)
+                                   FileType::RegularFile
                                 };
 
                                 let ino = self.register_path(&path);
@@ -312,7 +312,7 @@ impl Filesystem for RemoteFS {
                                     ctime: ts,
                                     crtime: ts,
                                     kind,
-                                    perm,
+                                    perm: obj.permissions,
                                     nlink: obj.links,
                                     uid: self.uid,
                                     gid: self.gid,
@@ -475,12 +475,12 @@ impl Filesystem for RemoteFS {
 
     match res {
         Some(obj) => {
-           // println!("json {:?}", obj);
+            println!("json {:?}", obj);
 
-            let (kind, perm) = if obj.is_directory {
-                (FileType::Directory, 0o755)
+            let kind= if obj.is_directory {
+                FileType::Directory
             } else {
-                (FileType::RegularFile, 0o644)
+                FileType::RegularFile
             };
 
             let ino = self.register_path(&path);
@@ -494,7 +494,7 @@ impl Filesystem for RemoteFS {
                 ctime: ts,
                 crtime: ts,
                 kind,
-                perm,
+                perm: obj.permissions,
                 nlink: obj.links,
                 uid: self.uid,
                 gid: self.gid,
@@ -602,8 +602,8 @@ impl Filesystem for RemoteFS {
             kind: FileType::RegularFile,
             perm: 0o644,
             nlink: 1,
-            uid: 1000,
-            gid: 1000,
+            uid: self.uid,
+            gid: self.gid,
             rdev: 0,
             flags: 0,
             blksize: 512,

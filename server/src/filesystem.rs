@@ -106,16 +106,16 @@ pub struct FileMetadata {
     pub file_id: Option<i64>,
     pub path: String,
     pub user_id: i64,
-    pub user_permissions: u32,     // 0-7 (rwx)
-    pub group_permissions: u32,    // 0-7 (rwx)
-    pub others_permissions: u32,   // 0-7 (rwx)
+    pub user_permissions: u16,     // 0-7 (rwx)
+    pub group_permissions: u16,    // 0-7 (rwx)
+    pub others_permissions: u16,   // 0-7 (rwx)
     pub size: i64,
     pub created_at: String,
     pub last_modified: String,
 }
 
 impl FileMetadata {
-    pub fn new(path: &str, user_id: i64, permissions: u32, is_directory: bool) -> Self {
+    pub fn new(path: &str, user_id: i64, permissions: u16, is_directory: bool) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
         
         let user_perms = (permissions >> 6) & 0o7;
@@ -135,7 +135,7 @@ impl FileMetadata {
         }
     }
     
-    pub fn get_octal_permissions(&self) -> u32 {
+    pub fn get_octal_permissions(&self) -> u16 {
         (self.user_permissions << 6) + (self.group_permissions << 3) + self.others_permissions
     }
 
@@ -147,7 +147,7 @@ impl FileMetadata {
 // struct used to represent the informations of a file (the ones you want to see when you write ls -l)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
-    pub permissions: String,        // es: "drwxr-xr-x", "-rw-r--r--"
+    pub permissions: u16,        // es: 0o755
     pub links: u32,                 // always 1
     pub owner: String,              // owner username
     pub group: String,              // group (always users)
@@ -159,7 +159,7 @@ pub struct FileInfo {
 
 impl FileInfo {
     pub fn new(
-        permissions: String,
+        permissions:u16,
         owner: String,
         size: i64,
         modified: String,
@@ -228,28 +228,10 @@ impl FileSystem {
     }
 
     // function to format permissions in the unix style
-    fn format_permissions(user_perms: u32, group_perms: u32, others_perms: u32, is_directory: bool) -> String {
+    fn format_permissions(user_perms: u16, group_perms: u16, others_perms: u16, is_directory: bool) -> u16 {
         let mut result = String::new();
-        
-        // Primo carattere: tipo di file
-        result.push(if is_directory { 'd' } else { '-' });
-        
-        // Permessi user (owner)
-        result.push(if user_perms & 4 != 0 { 'r' } else { '-' });
-        result.push(if user_perms & 2 != 0 { 'w' } else { '-' });
-        result.push(if user_perms & 1 != 0 { 'x' } else { '-' });
-        
-        // Permessi group
-        result.push(if group_perms & 4 != 0 { 'r' } else { '-' });
-        result.push(if group_perms & 2 != 0 { 'w' } else { '-' });
-        result.push(if group_perms & 1 != 0 { 'x' } else { '-' });
-        
-        // Permessi others
-        result.push(if others_perms & 4 != 0 { 'r' } else { '-' });
-        result.push(if others_perms & 2 != 0 { 'w' } else { '-' });
-        result.push(if others_perms & 1 != 0 { 'x' } else { '-' });
-        
-        result
+        // Si usa l'operatore OR (|) per combinare i valori
+        (user_perms << 6) | (group_perms << 3) | others_perms  
     }
 
     fn format_timestamp(timestamp: &str) -> String {
@@ -681,9 +663,9 @@ impl FileSystem {
             let file_iter = stmt.query_map(params![like_pattern, requesting_user_id], |row| {
                 let path: String = row.get(0)?;
                 let user_id: i64 = row.get(1)?;
-                let user_perms: u32 = row.get(2)?;
-                let group_perms: u32 = row.get(3)?;
-                let others_perms: u32 = row.get(4)?;
+                let user_perms: u16 = row.get(2)?;
+                let group_perms: u16= row.get(3)?;
+                let others_perms: u16 = row.get(4)?;
                 let size: i64 = row.get(5)?;
                 let last_modified: String = row.get(6)?;
                 let username: Option<String> = row.get(7)?;
@@ -765,9 +747,9 @@ impl FileSystem {
             let result = stmt.query_row(params![normalized_path], |row| {
                 let path: String = row.get(0)?;
                 let user_id: i64 = row.get(1)?;
-                let user_perms: u32 = row.get(2)?;
-                let group_perms: u32 = row.get(3)?;
-                let others_perms: u32 = row.get(4)?;
+                let user_perms: u16 = row.get(2)?;
+                let group_perms: u16 = row.get(3)?;
+                let others_perms: u16 = row.get(4)?;
                 let size: i64 = row.get(5)?;
                 let last_modified: String = row.get(6)?;
                 let username: Option<String> = row.get(7)?;
@@ -789,18 +771,20 @@ impl FileSystem {
                     };
                     
                     // ✅ COMPORTAMENTO: Mostra l'item sempre, ma nascondi dettagli se non leggibile
-                    let (permissions, display_size, display_owner, formatted_time) = if can_read_item {
+                    //if can_read_item
+                    let (permissions, display_size, display_owner, formatted_time) = {
                         // Item leggibile: mostra tutti i dettagli
                         let permissions = Self::format_permissions(user_perms, group_perms, others_perms, is_directory);
                         let owner = username.unwrap_or_else(|| format!("user{}", user_id));
                         let formatted_time = Self::format_timestamp(&last_modified);
                         (permissions, size, owner, formatted_time)
-                    } else {
-                        // Item NON leggibile: mostra solo nome e tipo, resto nascosto
-                        let permissions = if is_directory { "d?????????" } else { "-?????????" }.to_string();
-                        ("?".to_string(), 0, "?".to_string(), "??? ?? ??:??".to_string())
                     };
-                    
+                    // } else {
+                    //     // Item NON leggibile: mostra solo nome e tipo, resto nascosto
+                    //     let permissions = if is_directory { "d?????????" } else { "-?????????" }.to_string();
+                    //     ("?".to_string(), 0, "?".to_string(), "??? ?? ??:??".to_string())
+                    // };
+                    println!("permessions: {}", permissions);
                     let file_info = FileInfo::new(
                         permissions,
                         display_owner,
