@@ -165,7 +165,6 @@ COSE DA FARE
 PROBLEMI 
 
 - SERVER se ci sono le cartelle già presenti il server quando fa il mount non scrive i file coi permessi nel db e non funzionano
-- CLIENT non si può modificare un file esistente 
 
 COME TESTARE:
 **/server cargo run 
