@@ -1,12 +1,17 @@
 
 use client::fuse_mod::RemoteFS;
 use serde::{Deserialize, Serialize};
-use std::io::{self, Write};
+use tokio::task;
+
+use std::{io::{self, Write}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::Duration};
 use rpassword::read_password;
 use reqwest::Client;
 use users::{get_user_by_name};
 use std::process::Command;
 use daemonize::Daemonize;
+use std::fs::File;
+use signal_hook::consts::TERM_SIGNALS;
+use signal_hook::iterator::Signals;
 
 #[derive(Serialize)]
 struct LoginRequest {
@@ -66,13 +71,10 @@ fn ensure_local_user(username: &str) -> (u32, u32) {
 }
 
 
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("== Remote FS ==");
-
-    //login or registration
+     //login or registration
     let mut account= false;
     while !account{
         print!("Do you already have an account? (y/n)");
@@ -98,23 +100,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let password = read_password().unwrap();
 
                 let client = Client::new();
-                let res = client.post("http://127.0.0.1:8080/auth/register")
+                
+                let res= task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async {
+                    // richieste HTTP
+                    let res = client.post("http://127.0.0.1:8080/auth/register")
                             .json(&LoginRequest { username, password })
                             .send()
-                            .await?;
-                        
-                let status= res.status();       
-                if status.is_success() {
-                    println!("✅ Correctly registered");
-                    account = true;
-                } else {
-                    let text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                    println!("❌ Registration failed: HTTP {} - {}", status, text);
-                }  
-                
+                            .await;
+                    res
+                     })        
+                });
+
+                match res {
+                    Ok(r) if r.status().is_success()=>{
+                        println!("✅ Correctly registered");
+                        account = true; 
+                    
+                    }
+                    _=> { return Err( "Error with registration".into());}
+                }
         }
         
-    }
+    }//fine loop registrazione
         
 
     // Input username
@@ -132,40 +141,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let current_user= username.clone();
     let client = Client::new();
-    let res = client.post("http://127.0.0.1:8080/auth/login")
-        .json(&LoginRequest { username, password })
-        .send()
-        .await?;
         
-    
-    let status= res.status();       
-    if status.is_success() {
-        println!("✅ Success Login");
-        let body= res.json();
-        let login_res: LoginResponse = body.await?;
-        let token= login_res.token;
-        println!("token: {}", token);
+    let login_res= task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async {
+                    // richieste HTTP
+                    let res = client.post("http://127.0.0.1:8080/auth/login")
+                                                .json(&LoginRequest { username, password })
+                                                .send()
+                                                .await
+                                                .map_err(|e| format!("HTTP request failed: {}", e))?;
+                    
+                    if res.status().is_success() {
+                        let body: LoginResponse = res
+                                                    .json()
+                                                    .await
+                                                    .map_err(|e| format!("Parsing JSON failed: {}", e))?;
+                        Ok(body)
+                    } else {
+                        Err::<LoginResponse, String>(format!("Login failed: HTTP {}", res.status()))
+                    }
+                    })        
+                }).map_err(Box::<dyn std::error::Error>::from)?;
 
-        // creao l'utente/restituisce uid e gid
-        let (uid, gid) = ensure_local_user(&current_user);
-        println!("Utente locale '{}' → UID={}, GID={}", current_user.clone(), uid, gid);
-        
-        let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token, uid, gid);
-        let mountpoint = "/home/irene/progetto_rust_filesystem/client/mount";
-        ensure_unmounted(mountpoint);
-        println!("Mounting Remote FS at {}", mountpoint);
-        
-        fuser::mount2(fs, mountpoint, &[])?;   
-    } else {
-        let text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        println!("❌ Login failed: HTTP {} - {}", status, text);
-        }
-    
-    
-    
-    
-    Ok(())
    
+            let token= login_res.token;
+            println!("token: {}", token);
+
+            // creao l'utente/restituisce uid e gid
+            let (uid, gid) = ensure_local_user(&current_user);
+            println!("Utente locale '{}' → UID={}, GID={}", current_user.clone(), uid, gid);
+            
+
+            let stdout = File::create("/tmp/myfs.out").unwrap();
+            let stderr = File::create("/tmp/myfs.err").unwrap();
+
+            let daemonize = Daemonize::new()
+                .pid_file("/tmp/myfs.pid") // dove salvare il PID
+                .chown_pid_file(true)
+                .working_directory("/home/irene/progetto_rust_filesystem/client") // directory di lavoro
+                .stdout(stdout)
+                .stderr(stderr)
+                .privileged_action(|| "Preparazione completata");
+
+            match daemonize.start() {
+                Ok(_) => {
+                    println!("Daemon avviato correttamente, mount in corso...");
+                    // qui monti il filesystem come sempre
+                    let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token, uid, gid);
+                    let mountpoint = "/home/irene/progetto_rust_filesystem/client/mount";
+                    ensure_unmounted(mountpoint);
+                    // 🔄 Flag condivisa per sapere quando terminare
+                    let running = Arc::new(AtomicBool::new(true));
+                    let r = running.clone();
+
+                //thread che si occupa dello spegnimento/smontamento
+                    thread::spawn(move || {
+                        let mut signals = Signals::new(TERM_SIGNALS).unwrap();
+                        if let Some(sig) = signals.forever().next() {
+                            println!("📩 Ricevuto segnale {:?}, smonto FS...", sig);
+                            r.store(false, Ordering::SeqCst);
+
+                            // Smonta il filesystem
+                            ensure_unmounted(mountpoint);
+                            std::process::exit(0);
+                        }
+                    });  
+
+
+                    println!("Mounting Remote FS at {}", mountpoint);
+                    fuser::mount2(fs, mountpoint, &[])?; 
+                    
+                    //  Loop principale: il daemon resta attivo finché running = true
+                    while running.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_secs(2));
+                    }
+
+                    println!("Uscita dal daemon, smontaggio...");
+                    ensure_unmounted(mountpoint);
+                }
+                Err(e) => eprintln!("Errore nell'avvio del daemon: {}", e),
+            }          
+    Ok(())
 }
 
 
