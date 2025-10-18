@@ -170,3 +170,12 @@ COME TESTARE:
 **/server cargo run 
 **/client cargo run 
 **/client/mount <op. filesystem>
+
+## DEMON 
+
+- vedere se esiste gia un pid attivo
+ps -p $(cat /tmp/myfs.pid)
+
+- vedere gli errori
+cat /tmp/myfs.err
+

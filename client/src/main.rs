@@ -72,11 +72,12 @@ fn ensure_local_user(username: &str) -> (u32, u32) {
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    
+    let rt = tokio::runtime::Runtime::new()?;
+   
     println!("== Remote FS ==");
      //login or registration
     let mut account= false;
-    while !account{
+     while !account{
         print!("Do you already have an account? (y/n)");
         io::stdout().flush()?;
         let mut answer = String::new();
@@ -101,17 +102,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let client = Client::new();
                 
-                let res= task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
+                let res=  rt.block_on(async {
                     // richieste HTTP
                     let res = client.post("http://127.0.0.1:8080/auth/register")
                             .json(&LoginRequest { username, password })
                             .send()
                             .await;
                     res
-                     })        
-                });
+                     });     
+                
 
                 match res {
                     Ok(r) if r.status().is_success()=>{
@@ -142,9 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_user= username.clone();
     let client = Client::new();
         
-    let login_res= task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
+    let login_res=  rt.block_on(async {
                     // richieste HTTP
                     let res = client.post("http://127.0.0.1:8080/auth/login")
                                                 .json(&LoginRequest { username, password })
@@ -160,8 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(body)
                     } else {
                         Err::<LoginResponse, String>(format!("Login failed: HTTP {}", res.status()))
-                    }
-                    })        
+                    }       
                 }).map_err(Box::<dyn std::error::Error>::from)?;
 
    
@@ -187,8 +183,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match daemonize.start() {
                 Ok(_) => {
                     println!("Daemon avviato correttamente, mount in corso...");
-                    // qui monti il filesystem come sempre
-                    let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token, uid, gid);
+                    
+                    // 🔥 Crea un nuovo runtime Tokio nel processo demone
+                    let rt = tokio::runtime::Runtime::new()?;
+
+                    // 🔥 Passalo alle operazioni FUSE
+                    rt.block_on(async {
+                        let fs = RemoteFS::new(
+                        "http://127.0.0.1:8080".to_string(),
+                        token,
+                        uid,
+                        gid,
+                        );
+
+                    // qui monto il filesystem come sempre
                     let mountpoint = "/home/irene/progetto_rust_filesystem/client/mount";
                     ensure_unmounted(mountpoint);
                     // 🔄 Flag condivisa per sapere quando terminare
@@ -210,8 +218,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
                     println!("Mounting Remote FS at {}", mountpoint);
-                    fuser::mount2(fs, mountpoint, &[])?; 
                     
+                    if let Err(e)= fuser::mount2(fs, mountpoint, &[]){
+                        eprintln!("Errore nel mount: {}", e);
+                    }
                     //  Loop principale: il daemon resta attivo finché running = true
                     while running.load(Ordering::SeqCst) {
                         thread::sleep(Duration::from_secs(2));
@@ -219,9 +229,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     println!("Uscita dal daemon, smontaggio...");
                     ensure_unmounted(mountpoint);
+                    });
                 }
                 Err(e) => eprintln!("Errore nell'avvio del daemon: {}", e),
-            }          
+            } 
+                
     Ok(())
 }
 
