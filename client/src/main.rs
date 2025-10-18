@@ -151,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Utente locale '{}' → UID={}, GID={}", current_user.clone(), uid, gid);
         
         let fs = RemoteFS::new("http://127.0.0.1:8080".to_string(), token, uid, gid);
-        let mountpoint = "/home/irene/progetto_rust_filesystem/client/mount";
+        let mountpoint = "/home/alessandro/Desktop/Poli/Programmazione_di_sistema/progetto/progetto_rust_filesystem/client/mount";
         ensure_unmounted(mountpoint);
         println!("Mounting Remote FS at {}", mountpoint);
         
