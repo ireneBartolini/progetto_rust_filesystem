@@ -725,7 +725,7 @@ impl Drop for RemoteFS {
         println!("smonto fuse");
         let _ = Command::new("fusermount3")
             .arg("-u")
-            .arg("/home/irene/progetto_rust_filesystem/client/mount")
+            .arg("/home/alessandro/Desktop/Poli/Programmazione_di_sistema/progetto/progetto_rust_filesystem/client/mount")
             .status();
     }
 }
