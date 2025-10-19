@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use bcrypt::{hash, verify, DEFAULT_COST};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use chrono::{Duration, Utc};
 use rusqlite::{Connection,  params, Result as SQLResult};
 
@@ -69,7 +70,7 @@ impl AuthService {
 
     // Registra un nuovo utente
     pub fn register(&self, req: RegisterRequest) -> Result<String, String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.blocking_lock();
         
         // Controlla se l'utente esiste già
         if users.contains_key(&req.username) {
@@ -106,7 +107,7 @@ impl AuthService {
     // Login utente
     pub fn login(&self, req: LoginRequest) -> Result<AuthResponse, String> {
 
-        let users = self.users.lock().unwrap();
+        let users = self.users.blocking_lock();
         
         // Trova l'utente
         let user = users.get(&req.username)
@@ -127,7 +128,7 @@ impl AuthService {
             Some(id) => id,
             None => {
                 // Se user_id non è in memoria, cerca nel database
-                let conn = self.conn.lock().unwrap();
+                let conn = self.conn.blocking_lock();
                 let mut stmt = conn.prepare("SELECT User_ID FROM USER WHERE Username = ?1")
                     .map_err(|e| format!("Database error: {}", e))?;
                 
@@ -209,7 +210,7 @@ impl AuthService {
 
     // Salva utenti su DB 
     pub fn save_to_db(&self, user: User) -> SQLResult<i32> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.blocking_lock();
         conn.execute(
             "INSERT INTO USER (Username, Password) VALUES (?1, ?2)", 
             params![user.username, user.password_hash],
@@ -221,7 +222,7 @@ impl AuthService {
 
     // Carica utenti da file
     pub fn load_from_db(conn: Arc<Mutex<Connection>>) -> Result<HashMap<String, User>, String> {
-        let c = conn.lock().unwrap();
+        let c = conn.blocking_lock();
         // ✅ USA: i nomi corretti delle colonne (Username, Password, User_ID)
         let stmt = c.prepare("SELECT Username, Password, User_ID FROM USER");
         match stmt {

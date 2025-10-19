@@ -4,7 +4,8 @@ use auth::{AuthService, LoginRequest, RegisterRequest};
 
 use rusqlite::{params, Connection, Result as SqlResult};
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::path::Path as StdPath;
 use axum::{
     extract::{Path, State, Query},
@@ -12,6 +13,7 @@ use axum::{
     response::{IntoResponse, Json, Html},
     routing::{get, post, put, delete},
     Router,
+    body::Body,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -133,7 +135,7 @@ async fn login(
         Ok(response) => {
             if let Ok(new_fs) = create_user_filesystem(&response.username, app_state.connection) {
                 // Aggiorna il filesystem nell'AppState
-                let mut fs = app_state.filesystem.lock().unwrap();
+                let mut fs = app_state.filesystem.lock().await;
                 *fs = Some(new_fs);
             }
             Json(response).into_response()
@@ -167,7 +169,7 @@ async fn list_dir(
         },
     };
 
-    let mut guard = app_state.filesystem.lock().unwrap();
+    let mut guard = app_state.filesystem.lock().await;
     let fs = match guard.as_mut() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
@@ -203,7 +205,7 @@ async fn read_file(
         return (StatusCode::UNAUTHORIZED, e).into_response();
     }
 
-    let mut guard = app_state.filesystem.lock().unwrap();
+    let mut guard = app_state.filesystem.lock().await;
     let fs = match guard.as_mut() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
@@ -224,38 +226,32 @@ async fn write_file(
     Path(path): Path<String>,
     headers: HeaderMap,
     query: Query<HashMap<String, String>>,
-    body: String,
+    body: Body,
 ) -> impl IntoResponse {
     let auth_service = &app_state.auth_service;
 
+    // Autenticazione
     let (_username, user_id) = match extract_user_from_headers(&headers, &auth_service) {
-        Ok((user, id)) => {
-            println!("✅ Authenticated user: {} (id: {})", user, id);
-            (user, id)
-        },
-        Err(e) => {
-            println!("❌ Authentication failed: {}", e);
-            return (StatusCode::UNAUTHORIZED, e).into_response();
-        },
+        Ok((user, id)) => (user, id),
+        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
     };
 
     // Leggi i permessi dalla query (default 644 per file)
     let permissions = query.get("permissions").unwrap_or(&"644".to_string()).clone();
-    
-    // check if the permissions are valid, otherwise return a BAD_REQUEST error
+
+    // Controlla se i permessi sono validi
     if !is_valid_permissions(&permissions) {
         return (StatusCode::BAD_REQUEST, "Invalid permissions format. Use 3 octal digits (e.g., 644)").into_response();
     }
 
-    let mut guard = app_state.filesystem.lock().unwrap();
+    let mut guard = app_state.filesystem.lock().await;
     let fs = match guard.as_mut() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
-    // TODO cahnge user_id
-    fs.change_dir("/").ok();
-    match fs.write_file(&path, &body, user_id as i64, &permissions) {
+    // Scrive il file tramite lo stream
+    match fs.write_file_stream(&path, body, user_id as i64, &permissions).await {
         Ok(_) => "File written successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -279,7 +275,7 @@ async fn delete_file(
         Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
     };
 
-    let mut guard = app_state.filesystem.lock().unwrap();
+    let mut guard = app_state.filesystem.lock().await;
     let fs = match guard.as_mut() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
@@ -317,7 +313,7 @@ async fn mkdir(
         return (StatusCode::BAD_REQUEST, "Invalid permissions format. Use 3 octal digits (e.g., 755)").into_response();
     }
 
-    let mut guard = app_state.filesystem.lock().unwrap();
+    let mut guard = app_state.filesystem.lock().await;
     let fs = match guard.as_mut() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
@@ -357,7 +353,7 @@ async fn lookup_item(
         },
     };
 
-    let guard = app_state.filesystem.lock().unwrap();
+    let guard = app_state.filesystem.lock().await;
     let fs = match guard.as_ref() {
         Some(fs) => fs,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
