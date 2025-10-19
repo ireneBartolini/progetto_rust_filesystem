@@ -16,6 +16,7 @@ chrono = { version = "0.4.20-rc.1" }
 users = "0.11"
 daemonize = "0.5"
 signal-hook = "0.3"
+clap = {version ="4.5", features=["derive"]}
 
 [lib]
 name = "client"

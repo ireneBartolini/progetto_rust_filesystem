@@ -171,11 +171,18 @@ COME TESTARE:
 **/client cargo run 
 **/client/mount <op. filesystem>
 
-## DEMON 
+## DAEMON 
 
 - vedere se esiste gia un pid attivo
 ps -p $(cat /tmp/myfs.pid)
 
+- uccidere demone in backend
+kill <PID>
+
 - vedere gli errori
 cat /tmp/myfs.err
+
+n.b 
+cargo run: client collegato al terminale
+cargo run -- --daemon : client in backend
 
