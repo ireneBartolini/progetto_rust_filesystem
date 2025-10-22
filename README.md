@@ -182,7 +182,15 @@ kill <PID>
 - vedere gli errori
 cat /tmp/myfs.err
 
-n.b 
-cargo run: client collegato al terminale
-cargo run -- --daemon : client in backend
+# Locale (default 127.0.0.1)
+cargo run
+
+# Con IP remoto
+cargo run -- --server-ip 172.20.10.12
+
+# Con daemon mode
+cargo run -- --daemon --server-ip 172.20.10.12
+
+# Con porta personalizzata
+cargo run -- --server-ip 192.168.1.100 --server-port 9000
 
