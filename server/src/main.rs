@@ -9,7 +9,7 @@ use std::path::Path as StdPath;
 use axum::{
     extract::{Path, State, Query},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Html},
     routing::{get, post, put, delete},
     Router,
 };
@@ -39,6 +39,9 @@ async fn main()-> SqlResult<()> {
     };
 
     let app = Router::new()
+        // Home pubblica (nessuna autenticazione richiesta)
+        .route("/", get(home))
+
         // Route di autenticazione (pubbliche)
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
@@ -54,7 +57,7 @@ async fn main()-> SqlResult<()> {
         // Stato condiviso
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     println!("Server listening on {}", addr);
     
     axum::serve(
@@ -79,6 +82,17 @@ fn is_valid_permissions(permissions: &str) -> bool {
     permissions.len() == 3 &&
     permissions.chars().all(|c| c.is_ascii_digit()) &&
     permissions.chars().all(|c| c as u8 >= b'0' && c as u8 <= b'7')
+}
+async fn home() -> impl IntoResponse {
+    let body = r#"<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Home</title></head>
+  <body>
+    <h1>Benvenuto</h1>
+    <p>Questa è la pagina home pubblica accessibile su /</p>
+  </body>
+</html>"#;
+    Html(body).into_response()
 }
 
 async fn register(
