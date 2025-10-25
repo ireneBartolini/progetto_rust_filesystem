@@ -30,8 +30,8 @@ async fn main()-> SqlResult<()> {
     // Crea (o apre) un database chiamato "mio_database.db"
     let connection  = Arc::new(Mutex::new(Connection::open("database/db.db")?));
 
-    // creation of the auth service
-    let auth_service = Arc::new(AuthService::new( connection.clone()  ));
+    // creation of the auth service (await since AuthService::new returns a Future)
+    let auth_service = Arc::new(AuthService::new(connection.clone()).await);
     let fs = Arc::new(Mutex::new(None));
 
     let state = AppState {
@@ -72,9 +72,9 @@ async fn main()-> SqlResult<()> {
 }
 
 // function to create the file system
-fn create_user_filesystem(username: &str, connection: Arc<Mutex<Connection>>) -> Result<FileSystem, String> {
+async fn create_user_filesystem(username: &str, connection: Arc<Mutex<Connection>>) -> Result<FileSystem, String> {
     let user_path = format!("remote-fs/{}", username);
-    let mut fs = FileSystem::from_file_system(&user_path);
+    let mut fs = FileSystem::from_file_system(&user_path).await;
     fs.set_side_effects(true);
     fs.set_database(connection);
     Ok(fs)
@@ -102,7 +102,7 @@ async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     let auth_service = &app_state.auth_service;
-    match auth_service.register(req) {
+    match auth_service.register(req).await {
         Ok(message) => {
             (StatusCode::CREATED, message).into_response()
         }
@@ -131,9 +131,9 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
     let auth_service = &app_state.auth_service;
-    match auth_service.login(req) {
+    match auth_service.login(req).await {
         Ok(response) => {
-            if let Ok(new_fs) = create_user_filesystem(&response.username, app_state.connection) {
+            if let Ok(new_fs) = create_user_filesystem(&response.username, app_state.connection).await {
                 // Aggiorna il filesystem nell'AppState
                 let mut fs = app_state.filesystem.lock().await;
                 *fs = Some(new_fs);
@@ -182,7 +182,7 @@ async fn list_dir(
     };
 
     // Usa il nuovo metodo che restituisce FileInfo
-    match fs.list_contents_with_metadata(&target_path, user_id as i64) {
+    match fs.list_contents_with_metadata(&target_path, user_id as i64).await {
         Ok(files_info) => {
             Json(files_info).into_response()
         },
@@ -211,8 +211,8 @@ async fn read_file(
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
-    fs.change_dir("/").ok();
-    match fs.read_file(&path) {
+    fs.change_dir("/").await.ok();
+    match fs.read_file(&path).await {
         Ok(content) => content.into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -281,8 +281,8 @@ async fn delete_file(
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
-    fs.change_dir("/").ok();
-    match fs.delete(&path, user_id as i64) {
+    fs.change_dir("/").await.ok();
+    match fs.delete(&path, user_id as i64).await {
         Ok(_) => "Directory/File deleted successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Permission denied") => (StatusCode::FORBIDDEN, e).into_response(),
@@ -319,13 +319,13 @@ async fn mkdir(
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "filesystem non inizializzato").into_response(),
     };
 
-    fs.change_dir("/").ok();
+    fs.change_dir("/").await.ok();
 
     let path = StdPath::new(&path);
     let old_dir = path.parent().and_then(|p| p.to_str()).unwrap_or("");
     let new_dir = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     println!("parent: '{}', new dir: '{}'", old_dir, new_dir);
-    match fs.make_dir_metadata(&format!("/{}", old_dir), new_dir, user_id as i64, &permissions) {
+    match fs.make_dir_metadata(&format!("/{}", old_dir), new_dir, user_id as i64, &permissions).await {
         Ok(_) => "Directory created successfully".into_response(),
         Err(e) if e.contains("not found") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) if e.contains("Invalid") => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -361,7 +361,7 @@ async fn lookup_item(
 
     println!("🔍 Looking up item: '{}' for user {}", path, user_id);
 
-    match fs.lookup_item(&path, user_id as i64) {
+    match fs.lookup_item(&path, user_id as i64).await {
         Ok(file_info) => {
             println!("✅ Lookup successful for '{}' file info: {:?}", path, Json(file_info.clone()));
             Json(file_info).into_response()

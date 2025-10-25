@@ -50,7 +50,8 @@ curl -X GET http://127.0.0.1:8080/list/ \
   -H "Authorization: Bearer $TOKEN_ALICE"
 
 ## read file content 
-curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt
+curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt \
+  -H "Authorization: Bearer $TOKEN_ALICE"
 
 ## write file content
 curl -X PUT http://127.0.0.1:8080/files/alice_secret.txt \

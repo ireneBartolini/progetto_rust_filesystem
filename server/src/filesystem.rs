@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
 use axum::body::Body;
 use futures::TryStreamExt;
+use futures::future::BoxFuture;
 
 
 pub enum FSItem {
@@ -57,10 +58,25 @@ impl FSItem {
         }
     }
 
-    pub fn remove(&mut self, name: &str) {
+    pub async fn remove(&mut self, name: &str) {
         match self {
             FSItem::Directory(d) => {
-                d.children.retain(|child| child.blocking_lock().name() != name);
+                // Sposta fuori i children per poterli filtrare con await
+                let old_children = std::mem::take(&mut d.children);
+                let mut kept = Vec::with_capacity(old_children.len());
+
+                for child in old_children {
+                    // Lock asincrono per leggere il nome
+                    let keep = {
+                        let guard = child.lock().await;
+                        guard.name() != name
+                    };
+                    if keep {
+                        kept.push(child);
+                    }
+                }
+
+                d.children = kept;
             }
             _ => panic!("Cannot remove item from non-directory"),
         }
@@ -75,13 +91,13 @@ impl FSItem {
     }
 
     // return the absolute path of the item (of the parent)
-    pub fn abs_path(&self) -> String {
+    pub async fn abs_path(&self) -> String {
         let mut parts = vec![];
         let mut current = self.parent().upgrade();
 
         while let Some(node) = current {
             // scope the guard briefly
-            let guard = node.blocking_lock();
+            let guard = node.lock().await;
             let name = guard.name().to_string();
             parts.insert(0, name);
             current = guard.parent().upgrade();
@@ -250,9 +266,9 @@ impl FileSystem {
         }
     }
 
-    fn get_username_by_id(&self, user_id: i64) -> Result<String, String> {
+    async fn get_username_by_id(&self, user_id: i64) -> Result<String, String> {
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             let mut stmt = conn.prepare("SELECT Username FROM USER WHERE User_ID = ?1")
                 .map_err(|e| e.to_string())?;
             
@@ -267,7 +283,7 @@ impl FileSystem {
     }
 
     // check if a user has the write permissions in a dir
-    fn check_dir_write_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
+    async fn check_dir_write_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
         // Normalizza il path
         let normalized_path = if (dir_path == "/" || dir_path == "") {
             return Ok(())       // In the root we always have write permissions
@@ -280,13 +296,13 @@ impl FileSystem {
 
 
         // Verifica che la directory esista nel filesystem virtuale
-        if self.find(&normalized_path).is_none() {
+        if self.find(&normalized_path).await.is_none() {
             return Err(format!("Directory '{}' not found", dir_path));
         }
 
         // Controlla i permessi nel database
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             
             let mut stmt = conn.prepare(
                 "SELECT user_id, user_permissions, group_permissions, others_permissions, type 
@@ -348,7 +364,7 @@ impl FileSystem {
         }
     }
 
-    fn check_dir_read_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
+    async fn check_dir_read_permission(&self, dir_path: &str, user_id: i64) -> Result<(), String> {
         let normalized_path = if dir_path == "/" || dir_path == "" {
             return Ok(()) // Root sempre accessibile
         } else {
@@ -358,12 +374,12 @@ impl FileSystem {
         println!("🔐 Checking read permission for user {} in directory '{}'", user_id, normalized_path);
 
         // Verifica che la directory esista nel filesystem virtuale
-        if self.find(&normalized_path).is_none() {
+        if self.find(&normalized_path).await.is_none() {
             return Err(format!("Directory '{}' not found", dir_path));
         }
 
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             
             let mut stmt = conn.prepare(
                 "SELECT user_id, user_permissions, group_permissions, others_permissions, type 
@@ -426,7 +442,7 @@ impl FileSystem {
 
 
 
-    pub fn from_file_system(base_path: &str) -> Self {
+    pub async fn from_file_system(base_path: &str) -> Self {
         
         let mut fs = FileSystem::new();
         fs.set_real_path(base_path);
@@ -458,9 +474,9 @@ impl FileSystem {
             let name = entry_path.file_name().unwrap().to_str().unwrap();
             
             if entry_path.is_dir() {
-                fs.make_dir(&head, name).unwrap();
+                fs.make_dir(&head, name).await.unwrap();
             } else if entry_path.is_file() {
-                fs.make_file(&head, name).unwrap();
+                fs.make_file(&head, name).await.unwrap();
             }
         }
 
@@ -472,9 +488,9 @@ impl FileSystem {
     }
 
 
-    fn make_real_path(&self, node: FSNode) -> String {
-        let lock = node.blocking_lock();
-        let mut abs_path = lock.abs_path();
+    async fn make_real_path(&self, node: FSNode) -> String {
+        let lock = node.lock().await;
+        let mut abs_path = lock.abs_path().await;
         let name = lock.name().to_string();
         drop(lock);
 
@@ -494,26 +510,27 @@ impl FileSystem {
         path.split('/').filter(|&t| t != "").collect()
     }
 
-    pub fn find(&self, path: &str) -> Option<FSNode> {
-        self.find_full(path, None)
+    pub fn find(&self, path: &str) -> BoxFuture<'_, Option<FSNode>> {
+        let path = path.to_string(); // possiede la stringa
+        Box::pin(async move { self.find_full(&path, None).await })
     }
 
     // find using either absolute or relative path
-    pub fn find_full(&self, path: &str, base: Option<&str>) -> Option<FSNode> {
+    pub async fn find_full(&self, path: &str, base: Option<&str>) -> Option<FSNode> {
         let parts = FileSystem::split_path(path);
 
         let mut current = if path.starts_with('/') {
             self.root.clone()
         } else {
             if let Some(base) = base {
-                self.find(base)?
+                self.find(base).await?
             } else {
                 self.current.clone()
             }
         };
 
         for part in parts {
-            let next_node = match current.blocking_lock().deref() {
+            let next_node = match current.lock().await.deref() {
                 FSItem::Directory(d) => {
                     if part == "." {
                         current.clone()
@@ -523,22 +540,25 @@ impl FileSystem {
                             None => return None,
                         }
                     } else {
-                        let item = d
-                            .children
-                            .iter()
-                            .find(|&child| child.blocking_lock().name() == part);
-
-                        if let Some(item) = item {
-                            item.clone()
-                        } else {
-                            return None;
+                        let mut found: Option<FSNode> = None;
+                        for child in &d.children {
+                            let name = { child.lock().await.name().to_string() };
+                            if name == part {
+                                found = Some(child.clone());
+                                break;
+                            }
                         }
+                        if let Some(item) = found { item } else { return None; }
                     }
-                },
+                }
                 FSItem::SymLink(link) => {
-                    let path = current.blocking_lock().abs_path();
-                    let target = self.follow_link(&path, &link);
-                    if let Some(target) = target {
+                    // calcola il base_path senza tenere lock oltre il necessario
+                    let base_path = {
+                        let g = current.lock().await;
+                        g.abs_path().await
+                    };
+                    // usa follow_link con argomenti posseduti (String) per evitare borrow/lifetime issues
+                    if let Some(target) = self.follow_link(base_path, link.target.clone()).await {
                         target
                     } else {
                         return None;
@@ -553,24 +573,38 @@ impl FileSystem {
         Some(current)
     }
 
-    pub fn follow_link(&self, path: &str, link: &SymLink) -> Option<FSNode> {
-        let node = self.find_full(&link.target, Some(path));
-        if let Some(node) = node {
-            match node.blocking_lock().deref() {
-                FSItem::Directory(_) => return Some(node.clone()),
-                FSItem::File(_) => return Some(node.clone()),
-                FSItem::SymLink(ref link) => {
-                    let path = node.blocking_lock().abs_path();
-                    return self.follow_link(&path, link)
-                },
+    pub fn follow_link<'a>(&'a self, base_path: String, target: String) -> BoxFuture<'a, Option<FSNode>> {
+        Box::pin(async move {
+            let mut base = base_path;
+            let mut tgt = target;
+            // limite per evitare loop infiniti
+            for _ in 0..32 {
+                let node = self.find_full(&tgt, Some(&base)).await?;
+                // scopri il tipo del nodo sotto lock, clona ciò che serve e rilascia il lock
+                let next = {
+                    let g = node.lock().await;
+                    match g.deref() {
+                        FSItem::Directory(_) | FSItem::File(_) => {
+                            // risolto: ritorna il nodo reale
+                            return Some(node.clone());
+                        }
+                        FSItem::SymLink(s) => {
+                            let next_target = s.target.clone();
+                            let next_base = g.abs_path().await;
+                            (next_target, next_base)
+                        }
+                    }
+                };
+                // prosegui al prossimo hop del symlink
+                tgt = next.0;
+                base = next.1;
             }
-        } else {
-            return None
-        }
+            None
+        })
     }
 
-    pub fn change_dir(&mut self, path: &str) -> Result<(), String> {
-        let node = self.find(path);
+    pub async fn change_dir(&mut self, path: &str) -> Result<(), String> {
+        let node = self.find(path).await;
         if let Some(n) = node {
             self.current = n;
             Ok(())
@@ -579,19 +613,19 @@ impl FileSystem {
         }
     }
 
-    pub fn list_contents(&self) -> Option<Vec<String>>{
-        if let Some(res) = self.current.blocking_lock().get_children(){
-            Some(res.iter().map(|child| child.blocking_lock().name().to_string()).collect())
-        }
-        else{
-            None
-        }
-    }
+    // pub async fn list_contents(&self) -> Option<Vec<String>>{
+    //     if let Some(res) = self.current.lock().await.get_children(){
+    //         Some(res.iter().map(|child| child.lock().await.name().to_string()).collect())
+    //     }
+    //     else{
+    //         None
+    //     }
+    // }
 
 
-    pub fn list_contents_with_metadata(&self, dir_path: &str, requesting_user_id: i64) -> Result<Vec<FileInfo>, String> {
+    pub async fn list_contents_with_metadata(&self, dir_path: &str, requesting_user_id: i64) -> Result<Vec<FileInfo>, String> {
         //  todo: come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. o un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?
-       // println!("❓come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. E un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?");
+        // println!("❓come faccio a implementare una risposta NOTFOUND nel caso non ci sia la cartella. E un UNAUTHORIZED nel caso non si abbia il permesso in read per la cartella?");
 
         // Controlla se la directory esiste nel filesystem virtuale
         let normalized_path = if dir_path == "/" || dir_path == "" {
@@ -601,13 +635,13 @@ impl FileSystem {
         };
 
         // Verifica esistenza nel filesystem virtuale
-        if !normalized_path.is_empty() && self.find(&normalized_path).is_none() {
+        if !normalized_path.is_empty() && self.find(&normalized_path).await.is_none() {
             return Err(format!("Directory '{}' not found", dir_path));
         }
 
         // Controlla se esiste nel database
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             
             if !normalized_path.is_empty() {
                 let mut exists_stmt = conn.prepare(
@@ -625,12 +659,12 @@ impl FileSystem {
         }
 
         // Controlla se l'utente può accedere alla directory
-        if let Err(e) = self.check_dir_read_permission(dir_path, requesting_user_id) {
+        if let Err(e) = self.check_dir_read_permission(dir_path, requesting_user_id).await {
             return Err(e);
         }
 
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             
             // Normalizza il path della directory
             let normalized_dir=dir_path.trim_start_matches('/').trim_end_matches('/');
@@ -712,7 +746,7 @@ impl FileSystem {
         }
     }
 
-    pub fn lookup_item(&self, item_path: &str, requesting_user_id: i64) -> Result<FileInfo, String> {
+    pub async fn lookup_item(&self, item_path: &str, requesting_user_id: i64) -> Result<FileInfo, String> {
         // Normalizza il path
         let normalized_path = if item_path == "/" || item_path == "" {
             "".to_string()
@@ -721,12 +755,12 @@ impl FileSystem {
         };
 
         // Verifica che l'item esista nel filesystem virtuale
-        if !normalized_path.is_empty() && self.find(&normalized_path).is_none() {
+        if !normalized_path.is_empty() && self.find(&normalized_path).await.is_none() {
             return Err(format!("Item '{}' not found in fs tree", item_path));
         }
 
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             
             // Query per ottenere i metadati dell'item specifico
             let mut stmt = conn.prepare(
@@ -803,37 +837,37 @@ impl FileSystem {
         }
     }
 
-    pub fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String>{
-        // Find the parent directory
-        //add the 
+    pub async fn make_dir(&mut self, path: &str, name: &str) -> Result<(), String>{
         println!("make dir");
         let node = if !path.is_empty() && path != "/" {
-            self.find(path).ok_or_else(|| format!("Directory {} not found", path))?
+            self.find(path).await.ok_or_else(|| format!("Directory {} not found", path))?
         } else {
             self.current.clone()
         };
 
-        // Check that it is a directory and that no child with the same name already exists
-        {
-            let lock = node.blocking_lock();
-            match &*lock {
-                FSItem::Directory(d) => {
-                    if d.children.iter().any(|child| child.blocking_lock().name() == name) {
-                        return Err(format!("Directory or file {} already exists in {}", name, path));
-                    }
-                }
+        // Estrai i children sotto lock, poi rilascia il lock e controlla esistenza con await
+        let children: Vec<FSNode> = {
+            let guard = node.lock().await;
+            match &*guard {
+                FSItem::Directory(d) => d.children.clone(),
                 _ => return Err(format!("Invalid request, {} is not a directory", path)),
+            }
+        };
+
+        // Verifica se esiste già un child con lo stesso nome (no async nella closure)
+        for child in &children {
+            let child_name = { child.lock().await.name().to_string() };
+            if child_name == name {
+                return Err(format!("Directory or file {} already exists in {}", name, path));
             }
         }
 
-        // After checking everything is okay we can perform the modifications on the filesystem
         if self.side_effects {
-            let real_path = self.make_real_path(node.clone());
+            let real_path = self.make_real_path(node.clone()).await;
             let target = PathBuf::from(&real_path).join(name);
             fs::create_dir(&target).map_err(|e| e.to_string())?;
         }
 
-        // Creeate the new directory
         let new_dir = FSItem::Directory(Directory {
             name: name.to_string(),
             parent: Arc::downgrade(&node),
@@ -841,9 +875,9 @@ impl FileSystem {
         });
         let new_node = Arc::new(Mutex::new(new_dir));
 
-        // Add the new node and child
+        // Aggiunge il nuovo nodo
         {
-            let mut lock = node.blocking_lock();
+            let mut lock = node.lock().await;
             if let FSItem::Directory(d) = &mut *lock {
                 d.children.push(new_node);
             }
@@ -853,18 +887,18 @@ impl FileSystem {
     }
 
     // this is the version of the make_dir function that also updates the metadat inside the databse (so the one called by main.rs)
-    pub fn make_dir_metadata(&mut self, path: &str, name: &str, user_id: i64, permissions: &str) -> Result<(), String> {
+    pub async fn make_dir_metadata(&mut self, path: &str, name: &str, user_id: i64, permissions: &str) -> Result<(), String> {
         
         if  path.is_empty() && path.trim()!=("/"){
         // Verifica che l'utente abbia permessi di scrittura nella directory parent
-            self.check_dir_write_permission(path, user_id)?    
+            self.check_dir_write_permission(path, user_id).await?    
         }
         
         // Permessi da stringa ottale a numero
         let permissions_octal = u32::from_str_radix(permissions, 8)
             .map_err(|_| format!("Invalid permissions format: {}", permissions))?;
         
-        self.make_dir(path, name)?;
+        self.make_dir(path, name).await?;
         
 
         // path completo della directory (path + name)
@@ -884,7 +918,7 @@ impl FileSystem {
 
         // Salva i metadati nel database
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             let now = chrono::Utc::now().to_rfc3339();
             
             // Decompongo i permessi ottali in user/group/others
@@ -923,12 +957,12 @@ impl FileSystem {
     }
 
     // make file method
-    pub fn make_file(&mut self, path: &str, name: &str) -> Result<(), String> {
-        if let Some(node) = self.find(path) {
+    pub async fn make_file(&mut self, path: &str, name: &str) -> Result<(), String> {
+        if let Some(node) = self.find(path).await {
 
             if self.side_effects {
                 // create the file on the file system
-                let real_path = self.make_real_path(node.clone());
+                let real_path = self.make_real_path(node.clone()).await;
                 let target = PathBuf::from(&real_path)
                     .join(name);
                 fs::File::create(&target).map_err(|e| e.to_string())?;
@@ -941,7 +975,7 @@ impl FileSystem {
             });
 
             let new_node = Arc::new(Mutex::new(new_file));
-            node.blocking_lock().add(new_node.clone());
+            node.lock().await.add(new_node.clone());
             Ok(())
         }
         else {
@@ -950,8 +984,8 @@ impl FileSystem {
     }
 
     // added for testing
-    pub fn make_link(&mut self, path: &str, name: &str, target: &str) -> Result<(), String> {
-        if let Some(node) = self.find(path) {
+    pub async fn make_link(&mut self, path: &str, name: &str, target: &str) -> Result<(), String> {
+        if let Some(node) = self.find(path).await {
 
             // handle symlinks on FS only on linux
             #[cfg(target_os = "linux")]
@@ -970,19 +1004,19 @@ impl FileSystem {
             });
 
             let new_node = Arc::new(Mutex::new(new_link));
-            node.blocking_lock().add(new_node.clone());
+            node.lock().await.add(new_node.clone());
             Ok(())
         } else {
             return Err(format!("Directory {} not found", path));
         }
     }
 
-    pub fn rename(&self, path: &str, new_name: &str) -> Result<(), String> {
-        let node = self.find(path);
+    pub async fn rename(&self, path: &str, new_name: &str) -> Result<(), String> {
+        let node = self.find(path).await;
         if let Some(n) = node {
 
             if self.side_effects {
-                let real_path = self.make_real_path(n.clone());
+                let real_path = self.make_real_path(n.clone()).await;
                 // dest
                 let mut parts = real_path.split("/").collect::<Vec<&str>>();
                 parts.pop();
@@ -991,42 +1025,42 @@ impl FileSystem {
                 fs::rename(&real_path, &new_path).map_err(|e| e.to_string())?;
             }
 
-            n.blocking_lock().set_name(new_name);
+            n.lock().await.set_name(new_name);
             Ok(())
         } else {
             Err(format!("Item {} not found", path))
         }
     }
 
-    pub fn delete(&self, path: &str, user_id: i64) -> Result<(), String> {
-        let node:  Option<FSNode>  = self.find(path);
+    pub async fn delete(&self, path: &str, user_id: i64) -> Result<(), String> {
+        let node:  Option<FSNode>  = self.find(path).await;
         if let Some(n) = node {
 
             // per eliminare un file o cartella si devono avere i permessi in scrittura sulla parent directory
             let path_ = Path::new(&path);
             let parent_dir = path_.parent().and_then(|p| p.to_str()).unwrap_or("");
 
-            if let Err(e) = self.check_dir_write_permission(parent_dir, user_id) {
+            if let Err(e) = self.check_dir_write_permission(parent_dir, user_id).await {
                 return Err(e);
             }
             
             if self.side_effects {
-                let item = n.blocking_lock();
+                let item = n.lock().await;
                 match &*item {
                     FSItem::File(_) => {
                         drop(item);
-                        let real_path = self.make_real_path(n.clone());
+                        let real_path = self.make_real_path(n.clone()).await;
                         fs::remove_file(&real_path).map_err(|e| e.to_string())?;
                     }
                     FSItem::Directory(_) => {
                         drop(item);
-                        let real_path = self.make_real_path(n.clone());
+                        let real_path = self.make_real_path(n.clone()).await;
                         fs::remove_dir_all(&real_path).map_err(|e| e.to_string())?;
                         
                     }
                     FSItem::SymLink(_) => {
                         drop(item);
-                        let real_path = self.make_real_path(n.clone());
+                        let real_path = self.make_real_path(n.clone()).await;
                         fs::remove_file(&real_path).map_err(|e| e.to_string())?;
                     }
                 }
@@ -1034,17 +1068,17 @@ impl FileSystem {
             }
 
             // Remove from the database
-            if let Err(e) = self.remove_from_database(path, user_id) {
+            if let Err(e) = self.remove_from_database(path, user_id).await {
                 println!("Warning: Failed to remove metadata from database: {}", e);
                 // Non blocco l'operazione se la rimozione dal database fallisce, si segnala solo un warning
             }
 
-            let lock  = n.blocking_lock();
+            let lock  = n.lock().await;
             let name = lock.name().to_string();
             let par = lock.parent();
             if let Some(parent) = par.upgrade(){
                 drop(lock);
-                parent.blocking_lock().remove(&name);
+                parent.lock().await.remove(&name);
             }
            
             Ok(())
@@ -1058,9 +1092,9 @@ impl FileSystem {
         self.side_effects = side_effects;
     }
 
-    fn remove_from_database(&self, item_path: &str, user_id: i64) -> Result<(), String> {
+    async fn remove_from_database(&self, item_path: &str, user_id: i64) -> Result<(), String> {
         if let Some(ref db) = self.db_connection {
-            let conn = db.blocking_lock();
+            let conn = db.lock().await;
             let normalized_path = item_path.trim_start_matches('/');
             
             println!("🗄️  Removing from database: '{}'", normalized_path);
@@ -1177,7 +1211,7 @@ impl FileSystem {
         }
     }
 
-    pub fn write_file(&mut self, path: &str, content: &str, user_id: i64, permissions: &str) -> Result<(), String> {
+    pub async fn write_file(&mut self, path: &str, content: &str, user_id: i64, permissions: &str) -> Result<(), String> {
         // NParsing permessi da stringa ottale a numero
         let permissions_octal = u32::from_str_radix(permissions, 8)
             .map_err(|_| format!("Invalid permissions format: {}", permissions))?;
@@ -1186,19 +1220,19 @@ impl FileSystem {
         let content_size = content.len() as i64;
 
 
-        let node = self.find(path);
+        let node = self.find(path).await;
         if let Some(n) = node {
 
-            let lock = n.blocking_lock();
+            let lock = n.lock().await;
             match &*lock {
                 FSItem::File(_) => {
                     if self.side_effects {
                         drop(lock);
-                        let real_path = self.make_real_path(n.clone());
+                        let real_path = self.make_real_path(n.clone()).await;
                         fs::write(&real_path, content).map_err(|e| e.to_string())?;
 
                         if let Some(ref db) = self.db_connection {
-                            let conn = db.blocking_lock();
+                            let conn = db.lock().await;
                             let now = chrono::Utc::now().to_rfc3339();
                             
                             let normalized_path = if path == "/" || path == "" {
@@ -1230,27 +1264,27 @@ impl FileSystem {
             let file_name= path_buf.file_name().unwrap().to_str().unwrap();
 
             // in order to create a file we need to have the write permission on the directory
-            if let Err(e) = self.check_dir_write_permission(path_parent, user_id) {
+            if let Err(e) = self.check_dir_write_permission(path_parent, user_id).await {
                 return Err(e);
             }
             
-            let parent= self.find(path_parent);
+            let parent= self.find(path_parent).await;
             if let Some(p)=parent{
-                let lock= p.blocking_lock();
+                let lock= p.lock().await;
                 match lock.deref(){
                     FSItem::Directory(_) => {
                         drop(lock);
 
-                        self.make_file(path_parent, file_name)?;
+                        self.make_file(path_parent, file_name).await?;
 
                         if self.side_effects {
-                            let real_path_parent= self.make_real_path(p.clone());
+                            let real_path_parent= self.make_real_path(p.clone()).await;
                             let real_path= PathBuf::from(&real_path_parent).join(file_name);
                             fs::write(real_path, content).map_err(|e| e.to_string())?;
                         }
 
                         if let Some(ref db) = self.db_connection {
-                            let conn = db.blocking_lock();
+                            let conn = db.lock().await;
                             let now = chrono::Utc::now().to_rfc3339();
                             
                             // NOTE: Decompongo i permessi ottali in user/group/others
@@ -1315,13 +1349,13 @@ impl FileSystem {
         let mut content_size = 0;
 
         let node = self.find(path);
-        if let Some(n) = node {
+        if let Some(n) = node.await {
             let lock = n.lock().await;
             match &*lock {
                 FSItem::File(_) => {
                     if self.side_effects {
                         drop(lock);
-                        let real_path = self.make_real_path(n.clone());
+                        let real_path = self.make_real_path(n.clone()).await;
                         let mut file = tokio::fs::File::create(&real_path).await.map_err(|e| e.to_string())?;
 
                         // Itera manualmente sullo stream per leggere i dati e scriverli nel file
@@ -1335,7 +1369,7 @@ impl FileSystem {
 
                         // Aggiorna i metadati nel database
                         if let Some(ref db) = self.db_connection {
-                            let conn = db.blocking_lock();
+                            let conn = db.lock().await;
                             let now = chrono::Utc::now().to_rfc3339();
 
                             let normalized_path = if path == "/" || path == "" {
@@ -1367,9 +1401,9 @@ impl FileSystem {
             let file_name = path_buf.file_name().unwrap().to_str().unwrap();
 
             // Controlla i permessi di scrittura sulla directory parent
-            self.check_dir_write_permission(parent_path, user_id)?;
+            self.check_dir_write_permission(parent_path, user_id).await?;
 
-            let parent = self.find(parent_path);
+            let parent = self.find(parent_path).await;
             if let Some(p) = parent {
                 let lock = p.lock().await;
                 match lock.deref() {
@@ -1377,10 +1411,10 @@ impl FileSystem {
                         drop(lock);
 
                         // Crea il file nel filesystem virtuale
-                        self.make_file(parent_path, file_name)?;
+                        self.make_file(parent_path, file_name).await?;
 
                         if self.side_effects {
-                            let real_path_parent = self.make_real_path(p.clone());
+                            let real_path_parent = self.make_real_path(p.clone()).await;
                             let real_path = PathBuf::from(&real_path_parent).join(file_name);
 
                             // Scrive i dati dallo stream al file reale
@@ -1396,7 +1430,7 @@ impl FileSystem {
 
                         // Aggiorna i metadati nel database
                         if let Some(ref db) = self.db_connection {
-                            let conn = db.blocking_lock();
+                            let conn = db.lock().await;
                             let now = chrono::Utc::now().to_rfc3339();
 
                             // Decompone i permessi ottali in user/group/others
@@ -1441,15 +1475,15 @@ impl FileSystem {
         }
     }
 
-    pub fn read_file (&self, path: &str) -> Result<String, String> {
-        let node = self.find(path);
+    pub async fn read_file (&self, path: &str) -> Result<String, String> {
+        let node = self.find(path).await;
         if let Some(n) = node {
-            let lock = n.blocking_lock();
+            let lock = n.lock().await;
             match &*lock {
                 FSItem::File(_) => {
                     if self.side_effects {
                         drop(lock);
-                        let real_path = self.make_real_path(n.clone());
+                        let real_path = self.make_real_path(n.clone()).await;
                         let content = fs::read_to_string(&real_path).map_err(|e| e.to_string())?;
                         Ok(content)
                     } else {

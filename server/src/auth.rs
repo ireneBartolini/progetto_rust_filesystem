@@ -59,9 +59,9 @@ pub struct AuthService {
 }
 
 impl AuthService {
-    pub fn new( conn: Arc<Mutex<Connection>>) -> Self {
+    pub async fn new( conn: Arc<Mutex<Connection>>) -> Self {
         let u = AuthService::load_from_db(conn.clone());
-        let users_map = u.unwrap_or_default();
+        let users_map = u.await.unwrap_or_default();
         Self {
             users: Arc::new(Mutex::new(users_map)),
             conn: conn.clone()
@@ -69,8 +69,8 @@ impl AuthService {
     }
 
     // Registra un nuovo utente
-    pub fn register(&self, req: RegisterRequest) -> Result<String, String> {
-        let mut users = self.users.blocking_lock();
+    pub async fn register(&self, req: RegisterRequest) -> Result<String, String> {
+        let mut users = self.users.lock().await;
         
         // Controlla se l'utente esiste già
         if users.contains_key(&req.username) {
@@ -94,7 +94,7 @@ impl AuthService {
         };
 
         // Salva nel DB e ottieni l'ID generato
-        let user_id = self.save_to_db(user.clone())
+        let user_id = self.save_to_db(user.clone()).await
             .map_err(|e| format!("Failed to save user to database: {}", e))?;
 
         // Aggiorna l'user in memoria con l'ID corretto
@@ -105,9 +105,9 @@ impl AuthService {
     }
 
     // Login utente
-    pub fn login(&self, req: LoginRequest) -> Result<AuthResponse, String> {
+    pub async fn login(&self, req: LoginRequest) -> Result<AuthResponse, String> {
 
-        let users = self.users.blocking_lock();
+        let users = self.users.lock().await;
         
         // Trova l'utente
         let user = users.get(&req.username)
@@ -128,7 +128,7 @@ impl AuthService {
             Some(id) => id,
             None => {
                 // Se user_id non è in memoria, cerca nel database
-                let conn = self.conn.blocking_lock();
+                let conn = self.conn.lock().await;
                 let mut stmt = conn.prepare("SELECT User_ID FROM USER WHERE Username = ?1")
                     .map_err(|e| format!("Database error: {}", e))?;
                 
@@ -209,8 +209,8 @@ impl AuthService {
     }
 
     // Salva utenti su DB 
-    pub fn save_to_db(&self, user: User) -> SQLResult<i32> {
-        let conn = self.conn.blocking_lock();
+    pub async fn save_to_db(&self, user: User) -> SQLResult<i32> {
+        let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO USER (Username, Password) VALUES (?1, ?2)", 
             params![user.username, user.password_hash],
@@ -221,8 +221,8 @@ impl AuthService {
     }
 
     // Carica utenti da file
-    pub fn load_from_db(conn: Arc<Mutex<Connection>>) -> Result<HashMap<String, User>, String> {
-        let c = conn.blocking_lock();
+    pub async fn load_from_db(conn: Arc<Mutex<Connection>>) -> Result<HashMap<String, User>, String> {
+        let c = conn.lock().await;
         // ✅ USA: i nomi corretti delle colonne (Username, Password, User_ID)
         let stmt = c.prepare("SELECT Username, Password, User_ID FROM USER");
         match stmt {
