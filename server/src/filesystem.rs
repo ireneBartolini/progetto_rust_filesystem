@@ -14,6 +14,7 @@ use tokio::io::AsyncRead;
 use axum::body::Body;
 use futures::TryStreamExt;
 use futures::future::BoxFuture;
+use tokio_util::io::ReaderStream;
 
 
 pub enum FSItem {
@@ -1494,6 +1495,34 @@ impl FileSystem {
             }
         } else {
             Err(format!("File {} not found", path))
+        }
+    }
+
+    pub async fn read_file_stream(&self, path: &str) -> Result<Body, String> {
+        let node = self.find(path).await;
+        let n = node.ok_or_else(|| format!("File {} not found", path))?;
+
+        // verifica che sia un file, poi rilascia il lock prima di aprire il file reale
+        let is_file = {
+            let g = n.lock().await;
+            matches!(g.deref(), FSItem::File(_))
+        };
+        if !is_file {
+            return Err(format!("Invalid request, {} is not a file", path));
+        }
+
+        if self.side_effects {
+            let real_path = self.make_real_path(n.clone()).await;
+            let file = tokio::fs::File::open(&real_path)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let stream = ReaderStream::new(file); // Stream<Item = Result<bytes::Bytes, std::io::Error>>
+            let body = Body::from_stream(stream);
+            Ok(body)
+        } else {
+            // side effects disabilitati: restituisci body vuoto
+            Ok(Body::from(""))
         }
     }
 
