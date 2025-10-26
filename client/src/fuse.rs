@@ -3,8 +3,10 @@ pub mod fuse_mod{
 use serde::{Deserialize, Serialize};
 use libc::ENOENT;
 use reqwest::Client;
+use tokio::runtime::Runtime;
 use std::collections::HashMap;
 use std::process::Command;
+use std::str::Bytes;
 use libc::EIO;
 use chrono::{DateTime};
 use tokio::task;
@@ -40,6 +42,7 @@ pub struct RemoteFS {
     next_ino: u64,
     uid: u32,
     gid: u32,
+    write_buffer: Vec<u8>,
 }
 
 impl RemoteFS {
@@ -55,7 +58,8 @@ impl RemoteFS {
             path_to_parent: map_parent,
             next_ino: 2,
             uid,
-            gid
+            gid,
+            write_buffer: Vec::new(),
         }
     }
     
@@ -170,25 +174,24 @@ impl Filesystem for RemoteFS {
             blksize: 512,
         };
 
-        reply.entry(&Duration::new(1, 0), &attr, 0);
+        reply.entry(&Duration::new(60, 0), &attr, 0);
     }
 
-
-    fn read(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyData,
-    ) {
+fn read(
+    &mut self,
+    _req: &Request<'_>,
+    ino: u64,
+    _fh: u64,
+    offset: i64,
+    size: u32,
+    _flags: i32,
+    _lock_owner: Option<u64>,
+    reply: ReplyData,
+) {
         let path = self.get_path(ino).unwrap();
         println!("execute read {}", path);
         let client = Client::new();
-        let token = self.token.clone();
+    let token = self.token.clone();
         let base_url = self.base_url.clone();
 
         task::block_in_place(|| {
@@ -202,17 +205,17 @@ impl Filesystem for RemoteFS {
                     .await;
 
                 match resp {
-                    Ok(r) if r.status().is_success() => {
+        Ok(r) if r.status().is_success() => {
                         let content = r.bytes().await.unwrap_or_default();
                         let start = offset as usize;
                         let end = (offset as usize + size as usize).min(content.len());
                         reply.data(&content[start..end]);
-                    }
-                    _ => reply.error(ENOENT),
                 }
+                    _ => reply.error(ENOENT),
+        }
             });
         });
-    }
+        }
 
     fn getattr(&mut self, _: &Request, ino: u64, _: Option<u64>, reply: ReplyAttr) {
         
@@ -238,7 +241,8 @@ impl Filesystem for RemoteFS {
                 flags: 0,
                 blksize: 512,
                 };
-                reply.attr(&Duration::new(1, 0), &attr);
+                //3 min
+                reply.attr(&Duration::new(180, 0), &attr);
 
         }else{
 
@@ -471,7 +475,7 @@ impl Filesystem for RemoteFS {
                 blksize: 512,
             };
 
-            reply.entry(&Duration::new(10, 0), &attr, 0);
+            reply.entry(&Duration::new(60, 0), &attr, 0);
         }
         None => {
             println!("lookup fallita per {}", path);
@@ -550,16 +554,12 @@ impl Filesystem for RemoteFS {
     _flags: Option<u32>,
     reply: ReplyAttr,
     ) {
-        println!("setattr(ino={}, size={:?})", ino, size);
-    // Se viene richiesta una truncation, gestiscila (es. manda una chiamata al server)
-        if let Some(_new_size) = size {
-        // qui puoi chiamare l'API remota per troncare il file, oppure accettare e rispondere localmente
-        // per ora rispondiamo con attributi aggiornati (dummy)
+        let path= self.get_path(ino).unwrap();
+        println!("setattr(ino={}, size={:?}, path={})", ino, size, path);
         
-        }
-
+        //atributi dummy
         let ts = SystemTime::now();
-        let attr = FileAttr {
+        let mut attr = FileAttr {
             ino,
             size: size.unwrap_or(0),
             blocks: 0,
@@ -576,7 +576,66 @@ impl Filesystem for RemoteFS {
             flags: 0,
             blksize: 512,
         };
-        reply.attr(&Duration::new(1,0), &attr);
+
+    //   // Se viene richiesta una truncation, gestiscila (es. manda una chiamata al server)
+    //     if let Some(_new_size) = size {
+    //         println!(" caso truncation");
+    //         //API CALL
+    //         let client = Client::new();
+    //         let token = self.token.clone();
+    //         let base_url = self.base_url.clone();
+    //         let res: Option<FileInfo>= task::block_in_place(|| {
+    //         let rt = tokio::runtime::Handle::current();
+    //             rt.block_on(async {
+    //                 let resp = client
+    //                     .get(format!("{}/lookup/{}", base_url, path)) 
+    //                     .bearer_auth(token)
+    //                     .send()
+    //                     .await;
+
+    //                 match resp {
+    //                     Ok(r) if r.status().is_success() => r.json::<FileInfo>().await.ok(),
+    //                     _ => None,
+    //                 }
+    //             })
+    //         });
+
+    //     match res {
+    //         Some(obj) => {
+    //             println!("json {:?}", obj);
+
+    //             let kind= if obj.is_directory {
+    //                 FileType::Directory
+    //             } else {
+    //                 FileType::RegularFile
+    //             };
+
+    //             let ts = parse_time(&obj.modified);
+    //             attr = FileAttr {
+    //             ino,
+    //             size: obj.size,
+    //             blocks: (obj.size / 512).max(1),
+    //             atime: ts,
+    //             mtime: ts,
+    //             ctime: ts,
+    //             crtime: ts,
+    //             kind,
+    //             perm: obj.permissions,
+    //             nlink: obj.links,
+    //             uid: self.uid,
+    //             gid: self.gid,
+    //             rdev: 0,
+    //             flags: 0,
+    //             blksize: 512,
+    //         };
+    //      }
+    //     None => {//lookup fallita, il file ancora non esiste, vuole dire che è una write
+    //         }
+    //     }
+       
+    // }
+        reply.attr(&Duration::from_secs(30), &attr);
+        
     }
 
     fn write(
@@ -592,40 +651,80 @@ impl Filesystem for RemoteFS {
         reply: ReplyWrite,
     ) {
         
-        let path = self.get_path(ino).unwrap();
+        let path = match self.get_path(ino) {
+            Some(p) => p,
+            None => { reply.error(ENOENT); return; }
+        };
         println!("execute write {}", path);
-        let client = Client::new();
-        let token = self.token.clone();
-        let base_url = self.base_url.clone();
-        let body = String::from_utf8_lossy(data).to_string();
+    
+        self.write_buffer.append(& mut data.to_vec());
+        // let client = Client::new();
+        // let token = self.token.clone();
+        // let base_url = self.base_url.clone();
+        // let body = data.to_vec();
 
-        let ok: bool = task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .put(format!("{}/files/{}", base_url, path))
-                    .bearer_auth(token)
-                    .body(body)
-                    .send()
-                    .await;
+        // let ok: bool = task::block_in_place(|| {
+        //     let rt = tokio::runtime::Handle::current();
+        //     rt.block_on(async {
+        //         let resp = client
+        //             .put(format!("{}/files/{}", base_url, path))
+        //             .bearer_auth(token)
+        //             .body(body)
+        //             .send()
+        //             .await;
 
-                match resp {
-                    Ok(r) => r.status().is_success(),
-                    Err(_) => false,
-                }
-            })
-        });
+        //         match resp {
+        //             Ok(r) => r.status().is_success(),
+        //             Err(_) => false,
+        //         }
+        //     })
+        // });
 
-        if ok{
-            reply.written(data.len() as u32);
-        }else{
-            reply.error(EIO);
-        }
+    
+        reply.written(data.len() as u32);
+
     }
 
     fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        println!("flush(ino={})", ino);
-        reply.ok(); // non serve fare nulla
+        
+        let path = match self.get_path(ino) {
+            Some(p) => p,
+            None => { reply.error(ENOENT); return; }
+        };
+        let client = Client::new();
+        let token = self.token.clone();
+        let base_url = self.base_url.clone();
+        let body= self.write_buffer.clone();
+        self.write_buffer.clear();
+        println!(" flush (ino={}, path={}, len={}", ino, path, body.len());
+        if !body.is_empty(){
+            let ok: bool = task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    let resp = client
+                        .put(format!("{}/files/{}", base_url, path))
+                        .bearer_auth(token)
+                        .body(body)
+                        .send()
+                        .await;
+
+                    match resp {
+                        Ok(r) => r.status().is_success(),
+                        Err(_) => false,
+                    }
+                })
+            });
+
+            if ok{
+                reply.ok();
+            }else{
+                reply.error(EIO);
+            }
+        }else{
+           // è una read
+           //self.read_buffer.clear();
+           reply.ok()
+        }
     }
 
     fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
@@ -725,7 +824,7 @@ impl Drop for RemoteFS {
         println!("smonto fuse");
         let _ = Command::new("fusermount3")
             .arg("-u")
-            .arg("/home/alessandro/Desktop/Poli/Programmazione_di_sistema/progetto/progetto_rust_filesystem/client/mount")
+            .arg("./mount")
             .status();
     }
 }
