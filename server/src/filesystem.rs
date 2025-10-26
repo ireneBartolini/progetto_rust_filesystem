@@ -989,14 +989,14 @@ impl FileSystem {
         if let Some(node) = self.find(path).await {
 
             // handle symlinks on FS only on linux
-            #[cfg(target_os = "linux")]
-            if self.side_effects {
-                // create the link on the file system
-                let real_path = self.make_real_path(node.clone());
-                let link_path = PathBuf::from(&real_path)
-                    .join(name);
-                std::os::unix::fs::symlink(target, &link_path).map_err(|e| e.to_string())?;
-            }
+            // #[cfg(target_os = "linux")]
+            // if self.side_effects {
+            //     // create the link on the file system
+            //     let real_path = self.make_real_path(node.clone());
+            //     let link_path = PathBuf::from(&real_path)
+            //         .join(name);
+            //     std::os::unix::fs::symlink(target, &link_path).map_err(|e| e.to_string())?;
+            // }
 
             let new_link = FSItem::SymLink(SymLink {
                 name: name.to_string(),

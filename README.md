@@ -96,6 +96,12 @@ Invoke-RestMethod `
   -Headers @{ "Authorization" = "Bearer ALICE_TOKEN_HERE" } `
   -Body "This is Alice's private file!"
 
+## write a big file using streams (LOTR.pdf)
+cat LOTR.pdf | curl -v --http1.1 -X PUT -H "Authorization: Bearer ${TOKEN_ALICE}" -H "Content-Type: text/plain; charset=utf-8" "http://127.0.0.1:8080/files/LOTR.pdf?permissions=644" --data-binary @-
+
+
+## read a big file usign streams (LOTR.pdf)
+curl -fSsv -H "Authorization: Bearer ${TOKEN_ALICE}" "http://127.0.0.1:8080/files/LOTR.pdf" -o LOTR.pdf
 
   
 
