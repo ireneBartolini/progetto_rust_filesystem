@@ -2,19 +2,13 @@ pub mod fuse_mod{
 
 use serde::{Deserialize, Serialize};
 use libc::ENOENT;
-use reqwest::blocking::Client as BlockingClient; // <--- aggiunto
-use reqwest::Client;
-use tokio::runtime::Runtime;
+use reqwest::blocking::Client as BlockingClient; 
 use std::collections::HashMap;
-use std::process::Command;
-use std::str::Bytes;
 use libc::EIO;
 use chrono::{DateTime};
-use tokio::task;
 use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request};
 use std::time::{Duration, SystemTime};
 use std::ffi::OsStr;
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -43,7 +37,9 @@ pub struct RemoteFS {
     next_ino: u64,
     uid: u32,
     gid: u32,
-    write_buffer: Vec<u8>,
+    write_buffers: HashMap<u64, Vec<u8>>,
+    read_buffers: HashMap<u64, Vec<u8>>,
+
 }
 
 impl RemoteFS {
@@ -60,7 +56,8 @@ impl RemoteFS {
             next_ino: 2,
             uid,
             gid,
-            write_buffer: Vec::new(),
+            write_buffers: HashMap::new(),
+            read_buffers: HashMap::new(),
         }
     }
     
@@ -86,27 +83,12 @@ impl RemoteFS {
         self.inode_to_path.get(&ino).cloned()
     }
 
-    // fn exist_path(&mut self, path: &str)-> Option<u64>{
-    //     if let Some((&ino, _)) = self.inode_to_path.iter().find(|(_, p)| p.as_str() == path) {
-    //         Some(ino)
-    //     }else{
-    //         None
-    //     }
-    // }
-
-    // fn join_path(parent: &str, name: &str) -> String {
-    // if parent == "/" {
-    //     format!("/{}", name)
-    // } else {
-    //     format!("{}/{}", parent, name)
-    // }
-    // }
     
 }
 
-// ...existing code...
+
 impl Filesystem for RemoteFS {
-    // ...existing code...
+   
 
     fn read(
         &mut self,
@@ -124,7 +106,16 @@ impl Filesystem for RemoteFS {
             None => { reply.error(ENOENT); return; }
         };
         println!("execute read {} offset={} size={}", path, offset, size);
-
+        if let Some(buf) = self.read_buffers.get(&ino) {
+            let start = offset.max(0) as usize;
+            let end = std::cmp::min(start + size as usize, buf.len());
+            if start >= buf.len() {
+                reply.data(&[]);
+            } else {
+                reply.data(&buf[start..end]);
+            }
+            return;
+        }
         let client = BlockingClient::new();
         let token = self.token.clone();
         let base_url = self.base_url.trim_end_matches('/').to_string();
@@ -499,64 +490,6 @@ impl Filesystem for RemoteFS {
             flags: 0,
             blksize: 512,
         };
-
-    //   // Se viene richiesta una truncation, gestiscila (es. manda una chiamata al server)
-    //     if let Some(_new_size) = size {
-    //         println!(" caso truncation");
-    //         //API CALL
-    //         let client = Client::new();
-    //         let token = self.token.clone();
-    //         let base_url = self.base_url.clone();
-    //         let res: Option<FileInfo>= task::block_in_place(|| {
-    //         let rt = tokio::runtime::Handle::current();
-    //             rt.block_on(async {
-    //                 let resp = client
-    //                     .get(format!("{}/lookup/{}", base_url, path)) 
-    //                     .bearer_auth(token)
-    //                     .send()
-    //                     .await;
-
-    //                 match resp {
-    //                     Ok(r) if r.status().is_success() => r.json::<FileInfo>().await.ok(),
-    //                     _ => None,
-    //                 }
-    //             })
-    //         });
-
-    //     match res {
-    //         Some(obj) => {
-    //             println!("json {:?}", obj);
-
-    //             let kind= if obj.is_directory {
-    //                 FileType::Directory
-    //             } else {
-    //                 FileType::RegularFile
-    //             };
-
-    //             let ts = parse_time(&obj.modified);
-    //             attr = FileAttr {
-    //             ino,
-    //             size: obj.size,
-    //             blocks: (obj.size / 512).max(1),
-    //             atime: ts,
-    //             mtime: ts,
-    //             ctime: ts,
-    //             crtime: ts,
-    //             kind,
-    //             perm: obj.permissions,
-    //             nlink: obj.links,
-    //             uid: self.uid,
-    //             gid: self.gid,
-    //             rdev: 0,
-    //             flags: 0,
-    //             blksize: 512,
-    //         };
-    //      }
-    //     None => {//lookup fallita, il file ancora non esiste, vuole dire che è una write
-    //         }
-    //     }
-       
-    // }
         reply.attr(&Duration::from_secs(30), &attr);
         
     }
@@ -566,7 +499,7 @@ impl Filesystem for RemoteFS {
         _req: &Request<'_>,
         ino: u64,
         _fh: u64,
-        _offset: i64,
+        offset: i64,
         data: &[u8],
         _: u32,
         _flags: i32,
@@ -574,73 +507,51 @@ impl Filesystem for RemoteFS {
         reply: ReplyWrite,
     ) {
         
-        let path = match self.get_path(ino) {
-            Some(p) => p,
-            None => { reply.error(ENOENT); return; }
-        };
-        println!("execute write {}", path);
-    
-        self.write_buffer.append(& mut data.to_vec());
-        // let client = Client::new();
-        // let token = self.token.clone();
-        // let base_url = self.base_url.clone();
-        // let body = data.to_vec();
-
-        // let ok: bool = task::block_in_place(|| {
-        //     let rt = tokio::runtime::Handle::current();
-        //     rt.block_on(async {
-        //         let resp = client
-        //             .put(format!("{}/files/{}", base_url, path))
-        //             .bearer_auth(token)
-        //             .body(body)
-        //             .send()
-        //             .await;
-
-        //         match resp {
-        //             Ok(r) => r.status().is_success(),
-        //             Err(_) => false,
-        //         }
-        //     })
-        // });
-
-    
+        let buf = self.write_buffers.entry(ino).or_insert_with(Vec::new);
+        let off = offset.max(0) as usize;
+        let end_needed = off + data.len();
+        if buf.len() < end_needed {
+            buf.resize(end_needed, 0);
+        }
+        buf[off..off + data.len()].copy_from_slice(data);
         reply.written(data.len() as u32);
 
     }
 
     fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        let path = match self.get_path(ino) {
-            Some(p) => p,
-            None => { reply.error(ENOENT); return; }
-        };
-        let client = BlockingClient::new();
-        let token = self.token.clone();
-        let base_url = self.base_url.trim_end_matches('/').to_string();
-        let body = self.write_buffer.clone();
-        self.write_buffer.clear();
-        // non svuotare il buffer prima della richiesta
-        println!(" flush (ino={}, path={}, len={})", ino, path, body.len());
-
-        if body.is_empty() {
+        let buf = self.write_buffers.remove(&ino);
+        if let Some(body) = buf {
+            let path = match self.get_path(ino) {
+                Some(p) => p,
+                None => { reply.error(ENOENT); return; }
+            };
+            println!(" flush (ino={}, path={}, len={})", ino, path, body.len());
+            
+            let client = BlockingClient::new();
+            let token = self.token.clone();
+            let base_url = self.base_url.trim_end_matches('/').to_string();
+            
+            
+            match client.put(format!("{}/files/{}", base_url, path)).bearer_auth(token).body(body.clone()).send() {
+                Ok(r) if r.status().is_success() => {
+                    self.read_buffers.insert(ino, body.clone());
+                    reply.ok();
+                    //NECESSARIO PER VISUALLIZZARE SUBITO I PDF invalidare gli inode
+                  //  fuser::notify_inval_inode(mountpoint, ino, 0, 0);
+                }
+                Ok(r) => {
+                    println!("PUT returned HTTP {}", r.status());
+                    reply.error(EIO);
+                }
+                Err(e) => {
+                    println!("HTTP PUT error: {}", e);
+                    reply.error(EIO);
+                }
+            }
+    }else{
             reply.ok();
-            return;
-        }
-
-        match client.put(format!("{}/files/{}", base_url, path)).bearer_auth(token).body(body).send() {
-            Ok(r) if r.status().is_success() => {
-                // opzionale: aggiorna read buffer / size qui
-                reply.ok();
-            }
-            Ok(r) => {
-                println!("PUT returned HTTP {}", r.status());
-                reply.error(EIO);
-            }
-            Err(e) => {
-                println!("HTTP PUT error: {}", e);
-                reply.error(EIO);
-            }
-        }
     }
+}
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         println!("unlink(parent={}, name={:?})", parent, name);
