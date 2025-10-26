@@ -90,7 +90,7 @@ fn ensure_local_user(username: &str) -> (u32, u32) {
 }
 
 
-async fn run_filesystem(
+fn run_filesystem(
     base_url: String,
     token: String,
     uid: u32,
@@ -294,26 +294,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match daemonize.start() {
                     Ok(_) => {
                         println!("Daemon avviato correttamente, mount in corso...");
-                        
-                        // Crea un nuovo runtime Tokio nel processo demone
-                        let rt = tokio::runtime::Runtime::new()?;
-
-                        // Crea un runtime Tokio nel processo figlio
-                        rt.block_on(async move {
-                            run_filesystem(base_url, token, uid, gid, mountpoint).await;
-                        });
- 
+                        run_filesystem(base_url, token, uid, gid, mountpoint);
+                    
                     }
                     Err(e) => eprintln!("Errore nell'avvio del daemon: {}", e),
                 } 
             }else{
                 //no demon 
                 println!("Esecuzione in foreground (debug mode)");
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(async move {
-                run_filesystem(base_url, token, uid, gid, mountpoint).await;
-                });
-
+                run_filesystem(base_url, token, uid, gid, mountpoint);
+                
             }
                 
     Ok(())

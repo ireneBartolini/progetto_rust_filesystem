@@ -2,6 +2,7 @@ pub mod fuse_mod{
 
 use serde::{Deserialize, Serialize};
 use libc::ENOENT;
+use reqwest::blocking::Client as BlockingClient; // <--- aggiunto
 use reqwest::Client;
 use tokio::runtime::Runtime;
 use std::collections::HashMap;
@@ -85,144 +86,81 @@ impl RemoteFS {
         self.inode_to_path.get(&ino).cloned()
     }
 
-    fn exist_path(&mut self, path: &str)-> Option<u64>{
-        if let Some((&ino, _)) = self.inode_to_path.iter().find(|(_, p)| p.as_str() == path) {
-            Some(ino)
-        }else{
-            None
-        }
-    }
+    // fn exist_path(&mut self, path: &str)-> Option<u64>{
+    //     if let Some((&ino, _)) = self.inode_to_path.iter().find(|(_, p)| p.as_str() == path) {
+    //         Some(ino)
+    //     }else{
+    //         None
+    //     }
+    // }
 
-    fn join_path(parent: &str, name: &str) -> String {
-    if parent == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", parent, name)
-    }
-    }
+    // fn join_path(parent: &str, name: &str) -> String {
+    // if parent == "/" {
+    //     format!("/{}", name)
+    // } else {
+    //     format!("{}/{}", parent, name)
+    // }
+    // }
     
 }
 
-
+// ...existing code...
 impl Filesystem for RemoteFS {
-    fn mkdir(
+    // ...existing code...
+
+    fn read(
         &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        reply: ReplyEntry,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
     ) {
-        println!("mkdir(parent={}, name={:?})", parent, name);
-
-        // Ricava il path logico della nuova directory
-        let Some(parent_path) = self.get_path(parent) else {
-        reply.error(ENOENT);
-        return;
+        let path = match self.get_path(ino) {
+            Some(p) => p,
+            None => { reply.error(ENOENT); return; }
         };
+        println!("execute read {} offset={} size={}", path, offset, size);
 
-        let dir_name = name.to_str().unwrap_or("");
-        let full_path = if parent_path == "/" {
-            format!("/{}", dir_name)
-         } else {
-            format!("{}/{}", parent_path, dir_name)
-        };
-
-        // Chiamata remota al server (esempio)
-        let client = Client::new();
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
+        let base_url = self.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/files/{}", base_url, path);
 
-        let success = task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .post(format!("{}/mkdir/{}", base_url, full_path))
-                    .bearer_auth(token)
-                    .send()
-                    .await;
-            resp.map(|r| r.status().is_success()).unwrap_or(false)
-            })
-        });
-
-        if !success {
-            reply.error(EIO); // errore generico
-            return;
+        match client.get(&url).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => {
+                match r.bytes() {
+                    Ok(bytes) => {
+                        let start = offset.max(0) as usize;
+                        let end = std::cmp::min(start + size as usize, bytes.len());
+                        if start >= bytes.len() {
+                            reply.data(&[]);
+                        } else {
+                            reply.data(&bytes[start..end]);
+                        }
+                    }
+                    Err(_) => reply.error(ENOENT),
+                }
+            }
+            Ok(r) => {
+                println!("GET {} returned HTTP {}", url, r.status());
+                reply.error(ENOENT)
+            }
+            Err(e) => {
+                println!("HTTP GET error {}: {}", url, e);
+                reply.error(ENOENT)
+            }
         }
-
-        // Se la creazione remota è andata bene, aggiorna la mappa inode↔path
-        let ino=self.register_path(&full_path);
-
-        // Costruisci gli attributi fittizi per la risposta
-        let ts = SystemTime::now();
-        let attr = FileAttr {
-            ino,
-            size: 0,
-            blocks: 0,
-            atime: ts,
-            mtime: ts,
-            ctime: ts,
-            crtime: ts,
-            kind: FileType::Directory,
-            perm: 0o755,
-            nlink: 2,
-            uid: self.uid,
-            gid: self.gid,
-            rdev: 0,
-            flags: 0,
-            blksize: 512,
-        };
-
-        reply.entry(&Duration::new(60, 0), &attr, 0);
     }
 
-fn read(
-    &mut self,
-    _req: &Request<'_>,
-    ino: u64,
-    _fh: u64,
-    offset: i64,
-    size: u32,
-    _flags: i32,
-    _lock_owner: Option<u64>,
-    reply: ReplyData,
-) {
-        let path = self.get_path(ino).unwrap();
-        println!("execute read {}", path);
-        let client = Client::new();
-    let token = self.token.clone();
-        let base_url = self.base_url.clone();
-
-        task::block_in_place(|| {
-            
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .get(format!("{}/files/{}", base_url, path))
-                    .bearer_auth(token)
-                    .send()
-                    .await;
-
-                match resp {
-        Ok(r) if r.status().is_success() => {
-                        let content = r.bytes().await.unwrap_or_default();
-                        let start = offset as usize;
-                        let end = (offset as usize + size as usize).min(content.len());
-                        reply.data(&content[start..end]);
-                }
-                    _ => reply.error(ENOENT),
-        }
-            });
-        });
-        }
-
     fn getattr(&mut self, _: &Request, ino: u64, _: Option<u64>, reply: ReplyAttr) {
-        
-        let path= self.get_path(ino).unwrap();
+        let path = self.get_path(ino).unwrap_or_default();
         println!("getattr(ino={}, path={})", ino, path);
 
-        if ino==1{
+        if ino == 1 {
             let ts = SystemTime::now();
             let attr = FileAttr {
                 ino,
@@ -233,162 +171,116 @@ fn read(
                 ctime: ts,
                 crtime: ts,
                 kind: FileType::Directory,
-                perm:  0o755,
+                perm: 0o755,
                 nlink: 1,
                 uid: self.uid,
                 gid: self.gid,
                 rdev: 0,
                 flags: 0,
                 blksize: 512,
-                };
-                //3 min
-                reply.attr(&Duration::new(180, 0), &attr);
+            };
+            reply.attr(&Duration::new(180, 0), &attr);
+            return;
+        }
 
-        }else{
-
-        //API CALL
-        let client = Client::new();
+        // uso client sincrono per metadata
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
-        task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .get(format!("{}/lookup/{}", base_url, path)) // path già con /
-                    .bearer_auth(token)
-                    .send()
-                    .await;
+        let base_url = self.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/lookup/{}", base_url, path);
 
-                match resp {
-                    Ok(r) if r.status().is_success() => {
-                        println!("risposta corretta");
-                        match r.json::<FileInfo>().await {
-                            Ok(obj) => {
-                                println!("json {:?}", obj);
-
-                                let kind = if obj.is_directory {
-                                    FileType::Directory
-                                } else {
-                                   FileType::RegularFile
-                                };
-
-                                let ino = self.register_path(&path);
-
-                                let ts = parse_time(&obj.modified);
-                                let attr = FileAttr {
-                                    ino,
-                                    size: obj.size,
-                                    blocks: (obj.size / 512).max(1),
-                                    atime: ts,
-                                    mtime: ts,
-                                    ctime: ts,
-                                    crtime: ts,
-                                    kind,
-                                    perm: obj.permissions,
-                                    nlink: obj.links,
-                                    uid: self.uid,
-                                    gid: self.gid,
-                                    rdev: 0,
-                                    flags: 0,
-                                    blksize: 512,
-                                };
-                                reply.attr(&Duration::new(1, 0), &attr);
-                            }
-                            Err(_) => reply.error(ENOENT),
-                        }
+        match client.get(&url).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => match r.json::<FileInfo>() {
+                Ok(obj) => {
+                    println!("json {:?}", obj);
+                    let kind = if obj.is_directory { FileType::Directory } else { FileType::RegularFile };
+                    let ino = self.register_path(&path);
+                    let ts = parse_time(&obj.modified);
+                    let attr = FileAttr {
+                        ino,
+                        size: obj.size,
+                        blocks: (obj.size / 512).max(1),
+                        atime: ts,
+                        mtime: ts,
+                        ctime: ts,
+                        crtime: ts,
+                        kind,
+                        perm: obj.permissions,
+                        nlink: obj.links,
+                        uid: self.uid,
+                        gid: self.gid,
+                        rdev: 0,
+                        flags: 0,
+                        blksize: 512,
+                    };
+                    reply.attr(&Duration::new(1, 0), &attr);
                 }
-                _ => reply.error(ENOENT),
+                Err(_) => reply.error(ENOENT),
+            },
+            Ok(r) => {
+                println!("GET meta {} returned HTTP {}", url, r.status());
+                reply.error(ENOENT)
             }
-                
-            })
-        });
+            Err(e) => {
+                println!("HTTP GET meta error {}: {}", url, e);
+                reply.error(ENOENT)
+            }
+        }
     }
-    
-    }
-
-
-   
 
     fn readdir(
-        &mut self, 
-        _req: &Request, 
-        ino: u64, _: u64, 
-        offset: i64, 
-        mut reply: 
-        ReplyDirectory) {
-
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         let path = match self.get_path(ino) {
             Some(p) => p.clone(),
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };    
+            None => { reply.error(ENOENT); return; }
+        };
         println!("readdir(ino={}, offset={}, path={})", ino, offset, path);
 
-    
-        let client = Client::new();
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
+        let base_url = self.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/list/{}", base_url, path);
 
-        let files: Vec<FileInfo> =task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .get(format!("{}/list/{}", base_url, path)) // path già con /
-                    .bearer_auth(token)
-                    .send()
-                    .await;
+        let files: Vec<FileInfo> = match client.get(&url).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => r.json::<Vec<FileInfo>>().unwrap_or_default(),
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                println!("HTTP list error {}: {}", url, e);
+                Vec::new()
+            }
+        };
 
-                    match resp {
-                    Ok(r) if r.status().is_success() =>{
-                        let v= r.json::<Vec<FileInfo>>().await;
-                        v.unwrap_or(Vec::new())                   
-                    },
-                    _ => Vec::new(),
-                    }
-                
-            })
-        });
-
-    let i = offset;
-
+        let i = offset;
         if i == 0 {
             let current_ino = ino;
             let _ = reply.add(current_ino, 1, FileType::Directory, ".");
-
-            // trova il parent
             let parent_ino = if current_ino == 1 {
-                1 // root: parent == self
+                1
             } else {
-                let path = self.get_path(current_ino).unwrap();
-                *self.path_to_parent.get(&path).unwrap_or(&1)
+                let p = self.get_path(current_ino).unwrap_or("/".to_string());
+                *self.path_to_parent.get(&p).unwrap_or(&1)
             };
-
             let _ = reply.add(parent_ino, 2, FileType::Directory, "..");
         }
 
-
         for (idx, item) in files.iter().enumerate().skip((i - 2) as usize) {
-            let name= item.name.clone();
-            let kind;
-            if item.is_directory{
-                kind=FileType::Directory;
-            }else{
-                kind=FileType::RegularFile;
-            }
-            let next_offset = (idx as i64) + 3; // offset successivo
-            let full_path = format!("{}/{}", path, name);
-            let _= self.register_path(&full_path);
-            
-            let _ =reply.add((idx as u64) + 2, next_offset, kind, OsStr::new(&name));
+            let name = item.name.clone();
+            let kind = if item.is_directory { FileType::Directory } else { FileType::RegularFile };
+            let next_offset = (idx as i64) + 3;
+            let full_path = if path == "/" { format!("/{}", name) } else { format!("{}/{}", path, name) };
+            let ino = self.register_path(&full_path);
+            let _ = reply.add(ino, next_offset, kind, OsStr::new(&name));
         }
 
         reply.ok();
-    
     }
 
-//controlla che file/dir esitano o meno
     fn lookup(
         &mut self,
         _req: &Request<'_>,
@@ -396,8 +288,7 @@ fn read(
         name: &OsStr,
         reply: ReplyEntry,
     ) {
-    
-        let parent_path= self.get_path(parent).unwrap();
+        let parent_path = self.get_path(parent).unwrap();
         let path = if parent_path == "/" {
             format!("/{}", name.to_str().unwrap())
         } else {
@@ -405,9 +296,6 @@ fn read(
         };
 
         let name_str = name.to_str().unwrap_or("");
-
-        // escludi le lookup spurie di comandi tipo "echo", "total", "drwxr-xr-x", numeri, ecc.
-        //é 
         let is_spurious = name_str.chars().all(|c| c.is_numeric())
             || name_str.starts_with("drwx")
             || name_str.eq_ignore_ascii_case("total")
@@ -424,69 +312,116 @@ fn read(
         }
 
         println!("lookup(parent={}, name={:?})", parent, name);
-      
-        //API CALL
-        let client = Client::new();
+
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
-        let res: Option<FileInfo>= task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .get(format!("{}/lookup/{}", base_url, path)) // path già con /
-                    .bearer_auth(token)
-                    .send()
-                    .await;
+        let base_url = self.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/lookup/{}", base_url, path);
 
-                match resp {
-                    Ok(r) if r.status().is_success() => r.json::<FileInfo>().await.ok(),
-                    _ => None,
+        match client.get(&url).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => match r.json::<FileInfo>() {
+                Ok(obj) => {
+                    println!("json {:?}", obj);
+                    let kind = if obj.is_directory { FileType::Directory } else { FileType::RegularFile };
+                    let ino = self.register_path(&path);
+                    let ts = parse_time(&obj.modified);
+                    let attr = FileAttr {
+                        ino,
+                        size: obj.size,
+                        blocks: (obj.size / 512).max(1),
+                        atime: ts,
+                        mtime: ts,
+                        ctime: ts,
+                        crtime: ts,
+                        kind,
+                        perm: obj.permissions,
+                        nlink: obj.links,
+                        uid: self.uid,
+                        gid: self.gid,
+                        rdev: 0,
+                        flags: 0,
+                        blksize: 512,
+                    };
+                    reply.entry(&Duration::new(60, 0), &attr, 0);
                 }
-            })
-        });
-
-    match res {
-        Some(obj) => {
-            println!("json {:?}", obj);
-
-            let kind= if obj.is_directory {
-                FileType::Directory
-            } else {
-                FileType::RegularFile
-            };
-
-            let ino = self.register_path(&path);
-            let ts = parse_time(&obj.modified);
-            let attr = FileAttr {
-                ino,
-                size: obj.size,
-                blocks: (obj.size / 512).max(1),
-                atime: ts,
-                mtime: ts,
-                ctime: ts,
-                crtime: ts,
-                kind,
-                perm: obj.permissions,
-                nlink: obj.links,
-                uid: self.uid,
-                gid: self.gid,
-                rdev: 0,
-                flags: 0,
-                blksize: 512,
-            };
-
-            reply.entry(&Duration::new(60, 0), &attr, 0);
-        }
-        None => {
-            println!("lookup fallita per {}", path);
-            reply.error(ENOENT);
+                Err(_) => reply.error(ENOENT),
+            },
+            Ok(r) => {
+                println!("lookup {} returned HTTP {}", url, r.status());
+                reply.error(ENOENT)
+            }
+            Err(e) => {
+                println!("HTTP lookup error {}: {}", url, e);
+                reply.error(ENOENT)
+            }
         }
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        println!("mkdir(parent={}, name={:?})", parent, name);
+
+        let parent_path = self.get_path(parent).unwrap();
+        let dir_name = name.to_str().unwrap_or("");
+        let full_path = if parent_path == "/" { format!("/{}", dir_name) } else { format!("{}/{}", parent_path, dir_name) };
+
+        let client = BlockingClient::new();
+        let token = self.token.clone();
+        let base_url = self.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/mkdir/{}", base_url, full_path);
+
+        match client.post(&url).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => {
+                let ino = self.register_path(&full_path);
+                let ts = SystemTime::now();
+                let attr = FileAttr {
+                    ino,
+                    size: 0,
+                    blocks: 0,
+                    atime: ts,
+                    mtime: ts,
+                    ctime: ts,
+                    crtime: ts,
+                    kind: FileType::Directory,
+                    perm: 0o755,
+                    nlink: 2,
+                    uid: self.uid,
+                    gid: self.gid,
+                    rdev: 0,
+                    flags: 0,
+                    blksize: 512,
+                };
+                // Non crea davvero nulla, ma fa contento il kernel
+                reply.entry(&Duration::new(1, 0), &attr, 0);
+            }
+            _ => {
+                // server call failed
+                reply.error(EIO);
+                return;
+            }
+        }
+    }
+
+//DUMMY FUNCTION FOR FUSE
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        println!("open(ino={})", ino);
+        if flags & libc::O_WRONLY != 0 || flags & libc::O_RDWR != 0 {
+        println!("--> opening file for write");
+       
+        } 
+        println!("open flags: 0o{:o}", flags);
+
+    reply.opened(0, 0); // handle fittizio = 0, flags = 0
+    }
+       // create dummy: è necessaria per FUSe ma non chiama nessuna API
     
-    }
-
-    // create dummy: è necessaria per FUSe ma non chiama nessuna API
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -522,18 +457,6 @@ fn read(
 
         // Non crea davvero nulla, ma fa contento il kernel
         reply.created(&Duration::new(1, 0), &attr, 0, 0, 0);
-    }
-
-//DUMMY FUNCTION FOR FUSE
-    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        println!("open(ino={})", ino);
-        if flags & libc::O_WRONLY != 0 || flags & libc::O_RDWR != 0 {
-        println!("--> opening file for write");
-       
-        } 
-        println!("open flags: 0o{:o}", flags);
-
-    reply.opened(0, 0); // handle fittizio = 0, flags = 0
     }
 
     fn setattr(
@@ -686,147 +609,74 @@ fn read(
     }
 
     fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        
         let path = match self.get_path(ino) {
             Some(p) => p,
             None => { reply.error(ENOENT); return; }
         };
-        let client = Client::new();
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
-        let body= self.write_buffer.clone();
+        let base_url = self.base_url.trim_end_matches('/').to_string();
+        let body = self.write_buffer.clone();
         self.write_buffer.clear();
-        println!(" flush (ino={}, path={}, len={}", ino, path, body.len());
-        if !body.is_empty(){
-            let ok: bool = task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    let resp = client
-                        .put(format!("{}/files/{}", base_url, path))
-                        .bearer_auth(token)
-                        .body(body)
-                        .send()
-                        .await;
+        // non svuotare il buffer prima della richiesta
+        println!(" flush (ino={}, path={}, len={})", ino, path, body.len());
 
-                    match resp {
-                        Ok(r) => r.status().is_success(),
-                        Err(_) => false,
-                    }
-                })
-            });
+        if body.is_empty() {
+            reply.ok();
+            return;
+        }
 
-            if ok{
+        match client.put(format!("{}/files/{}", base_url, path)).bearer_auth(token).body(body).send() {
+            Ok(r) if r.status().is_success() => {
+                // opzionale: aggiorna read buffer / size qui
                 reply.ok();
-            }else{
+            }
+            Ok(r) => {
+                println!("PUT returned HTTP {}", r.status());
                 reply.error(EIO);
             }
-        }else{
-           // è una read
-           //self.read_buffer.clear();
-           reply.ok()
+            Err(e) => {
+                println!("HTTP PUT error: {}", e);
+                reply.error(EIO);
+            }
         }
     }
 
-    fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
-        println!("fsync(ino={}, fh={}, datasync={})", ino, fh, datasync);
-        reply.ok();
-    }
-
-    fn release(&mut self, _req: &Request, ino: u64, _fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
-        println!("release(ino={})", ino);
-
-        reply.ok(); // idem
-    }
-
-    
-    fn unlink(
-        &mut self, 
-        _req: &Request, 
-        parent: u64, 
-        name: &OsStr, 
-        reply: ReplyEmpty) 
-    {
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         println!("unlink(parent={}, name={:?})", parent, name);
-
-        let Some(parent_path) = self.get_path(parent) else {
-        reply.error(ENOENT);
-        return;
-        };
-
+        let Some(parent_path) = self.get_path(parent) else { reply.error(ENOENT); return; };
         let full_path = format!("{}/{}", parent_path, name.to_str().unwrap());
         println!("Deleting {}", full_path);
 
-        let client = Client::new();
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
+        let base_url = self.base_url.trim_end_matches('/').to_string();
 
-         task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .delete(format!("{}/files/{}", base_url, full_path))
-                    .bearer_auth(token)
-                    .send()
-                    .await;
-
-                match resp {
-                    Ok(r) if r.status().is_success() => reply.ok(),
-                    _ => reply.error(EIO),
-                }
-            });
-        });
-        
+        match client.delete(format!("{}/files/{}", base_url, full_path)).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => reply.ok(),
+            _ => reply.error(EIO),
+        }
     }
 
-    fn rmdir(
-    &mut self,
-    _req: &Request<'_>,
-    parent: u64,
-    name: &OsStr,
-    reply: ReplyEmpty,) 
-    {
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         println!("rmdir(parent={}, name={:?})", parent, name);
-
-        let Some(parent_path) = self.get_path(parent) else {
-            reply.error(ENOENT);
-            return;
-        };
-
+        let Some(parent_path) = self.get_path(parent) else { reply.error(ENOENT); return; };
         let full_path = format!("{}/{}", parent_path, name.to_str().unwrap());
         println!("Removing directory {}", full_path);
 
-        let client = Client::new();
+        let client = BlockingClient::new();
         let token = self.token.clone();
-        let base_url = self.base_url.clone();
+        let base_url = self.base_url.trim_end_matches('/').to_string();
 
-        task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let resp = client
-                    .delete(format!("{}/files/{}", base_url, full_path))
-                    .bearer_auth(token)
-                    .send()
-                    .await;
-
-                match resp {
-                    Ok(r) if r.status().is_success() => reply.ok(),
-                    _ => reply.error(EIO),
-                }
-            });
-        });
+        match client.delete(format!("{}/files{}", base_url, full_path)).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => reply.ok(),
+            _ => reply.error(EIO),
+        }
     }
 
-
+    
+    
 }
 
-impl Drop for RemoteFS {
-    fn drop(&mut self) {
-        println!("smonto fuse");
-        let _ = Command::new("fusermount3")
-            .arg("-u")
-            .arg("./mount")
-            .status();
-    }
-}
 
 }
