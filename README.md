@@ -1,196 +1,145 @@
-# progetto_rust_filesystem
+# Remote Filesystem Rust
 
-# Overview
-This project aims to implement a remote file system client in Rust that presents a local mount point, mirroring the struc
-file system hosted on a remote server. The file system should support transparent read and write access to remote file
-# Goals
-- Provide a local file system interface that interacts with a remote storage backend.
-- Enable standard file operations (read, write, create, delete, etc.) on remote files as if they were local.
-- Ensure compatibility with Linux systems.
-- Optionally support Windows and macOS with best-effort 
-# Funtional Requirements
-- Mount a virtual file system to a local path (e.g., /mnt/remote-fs )
-- Display directories and files from a remote source
-Read files from the remote server
-- Write modified files back to the remote server
-- Support creation, deletion, and renaming of files and directories
-- Maintain file attributes such as size, timestamps, and permissions (as feasible)
-- Run as a background daemon process that handles filesystem operations continuously
+Progetto didattico in Rust che implementa un filesystem remoto con due componenti:
 
-# Server Interface and Implementation 
-- The server should offer a set RESTful API for file operations:
-GET /list/<path> – List directory contents
-responce json let file_info = FileInfo::new(
-                        permissions,
-                        owner,
-                        size,
-                        formatted_time,
-                        file_name.clone(),
-                        is_directory,
-                    );
-GET /files/<path> – Read file contents
-PUT /files/<path> – Write file contents
-POST /mkdir/<path> – Create directory
-DELETE /files/<path> – Delete file or directory
-GET /lookup/<path>
-- The server can be implemented using any language or framework, but should be RESTful and stateless.
+- `server`: espone API HTTP stateless con autenticazione JWT
+- `client`: monta il filesystem remoto in locale tramite FUSE
 
-# Caching
-- Optional local caching layer for performance
-- Configurable cache invalidation strategy (e.g., TTL or LRU)
+L'obiettivo e rendere i file remoti accessibili come una cartella locale sulla macchina del client, mantenendo dati, logica di autenticazione, autorizzazione e metadati lato server.
 
-# Performance
-- Support for large files (100MB+) with streaming read/write
-- Reasonable latency (<500ms for operations under normal network conditions)
+## Panoramica Architetturale
 
-# CHIAMATE API
+### Server (`/server`)
 
-## List directory contents
-curl -X GET http://127.0.0.1:8080/list/ \
-  -H "Authorization: Bearer $TOKEN_ALICE"
+- Framework web: Axum
+- Protocollo: HTTP REST
+- Auth: JWT (login) + bcrypt (hash password)
+- Storage metadati: SQLite (`USER`, `METADATA`)
+- Storage file: filesystem locale organizzato per utente (`server/database/remote-fs/<username>/...`) filesystem persistente dove i file di ogni utente sono mantenuti in una cartella chiamata col suo username.  I metadati di ogni file/directory sono mantenuti nel database.
 
-## read file content 
-curl -X GET  http://127.0.0.1:8080/files/nuova_dir/dir_0/text.txt
+Responsabilita principali:
 
-## write file content
-curl -X PUT http://127.0.0.1:8080/files/alice_secret.txt \
-  -H "Authorization: Bearer $TOKEN_ALICE" \
-  -d "This is Alice's private file!"
+- registrazione e login utenti
+- validazione token JWT
+- operazioni file/cartelle (create, list, read, write, delete, lookup)
+- controllo permessi Unix-style (owner/group/others)
 
-## make dir 
-curl -X POST http://127.0.0.1:8080/mkdir/alice_documents \
-  -H "Authorization: Bearer $TOKEN_ALICE"
-  
-## delete 
-curl -X DELETE http://127.0.0.1:8080/files/alice_diary.txt \
-  -H "Authorization: Bearer $TOKEN_ALICE"
+### Client (`/client`)
 
-## register user
-curl -X POST http://127.0.0.1:8080/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "alice", "password": "password123"}'
+- Filesystem userspace: FUSE (`fuser`)
+- Trasporto: richieste HTTP al server
+- Cache locale: TTL su attributi/contenuti
+- Modalita esecuzione: foreground o daemon
 
-## login user
-curl -X POST http://127.0.0.1:8080/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "alice", "password": "password123"}'
+Responsabilita principali:
 
-## in order to save the token
-TOKEN_ALICE=$(curl -s -X POST http://127.0.0.1:8080/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "alice", "password": "password123"}' | \
-  grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+- tradurre le syscall FUSE in chiamate HTTP
+- gestire token JWT e sessione utente
+- mantenere una cache per ridurre roundtrip sul server
 
+## Flusso Operativo
 
-  ### PER WINDOWS 
-  Invoke-WebRequest `
->>   -Uri "http://127.0.0.1:8080/auth/register" `
->>   -Method POST `
->>   -Headers @{ "Content-Type" = "application/json" } `
->>   -Body '{"username": "alice", "password": "password123"}'
-## write file
-Invoke-RestMethod `
-  -Uri "http://127.0.0.1:8080/files/alice_secret.txt" `
-  -Method PUT `
-  -Headers @{ "Authorization" = "Bearer ALICE_TOKEN_HERE" } `
-  -Body "This is Alice's private file!"
+1. L'utente avvia il server.
+2. L'utente avvia il client e inserisce credenziali.
+3. Il client ottiene un token JWT dal server.
+4. Il mount FUSE espone una directory locale (`mount/`).
+5. Operazioni come `ls`, `cat`, `mkdir`, `rm` diventano chiamate HTTP alle API del server.
 
+## Struttura del Repository
 
-  
+```text
+progetto_rust_filesystem/
+  server/
+    src/
+      main.rs
+      auth.rs
+      filesystem.rs
+    database/
+      remote-fs/
+    tests/
+      api_test.rs
+      filesystem_test.rs
 
-## test
-Run on one terminal "cargo run"
-Run on the other terminal "cargo test --test api_test"
+  client/
+    src/
+      main.rs
+      fuse.rs
+```
 
+## Avvio Rapido
 
+### 1. Avviare il server
 
-## note
-FILE:
-| File_ID* | Path                      | User_ID | User_Permissions | Group_Permissions | Others_Permissions | Size (bytes) | Created_At           | Last_modified         |
-|----------|---------------------------|---------|------------------|-------------------|--------------------|--------------|----------------------|----------------------|
-| 1        | alice/alice_secret.txt    | 1       | rw-              | r--               | ---                | 1024         | 2024-05-01 10:00:00  | 2024-06-01 09:00:00  |
-| 2        | bob/bob_diary.txt         | 2       | rw-              | r--               | ---                | 2048         | 2024-05-02 11:00:00  | 2024-06-02 08:30:00  |
-| 3        | shared/group_notes.txt    | 1       | rw-              | rw-               | r--                | 4096         | 2024-05-03 12:00:00  | 2024-06-03 07:45:00  |
-| 4        | charlie/charlie_todo.txt  | 3       | rw-              | r--               | ---                | 512          | 2024-05-04 13:00:00  | 2024-06-04 07:00:00  |
-| 5        | public/readme.txt         | 4       | rw-              | rw-               | r--                | 256          | 2024-05-05 14:00:00  | 2024-06-05 06:30:00  |
+```bash
+cd server
+cargo run 
+```
 
-USER:
-| User_ID* | Username | Password                          |
-|----------|----------|-----------------------------------|
-| 1        | alice    | $2b$12$abcdehashedalicepassword   |
-| 2        | bob      | $2b$12$xyz12hashedbobpassword     |
-| 3        | charlie  | $2b$12$mnopqhashedcharliepassword |
-| 4        | dave     | $2b$12$rstuvhasheddavepassword    |
+Server in ascolto di default su `http://0.0.0.0:8080`.
 
-> Le password sono hashate.
+### 2. Avviare il client FUSE
 
+```bash
+cd client
+cargo run 
+```
 
+Modalita daemon:
 
+```bash
+cd client
+cargo run -- --daemon
+```
 
-#### CLIENT
+Configurazione endpoint server:
 
-- list
-
-ls 
-1. getattr <- info su directory corrente
-2. readdir 
-3. lookup <- su ogni entry restituita per mostrre gli attributi
-
-ls {subdir}
-1. lookup <- deve risolvere subdir 
-2. getattr <- controlla se esiste e che tipo di file 
-3. readdir 
-4. lookup risultato <- per ogni entry
-
-cat file.txt
-
-1.	lookup(parent=1, name="file.txt")	Risolvi il file.
-2.	getattr(ino=file_ino)	Ottieni attributi.
-3.	open(ino=file_ino)	Apre il file.
-4.	read(ino=file_ino, offset, size)	Legge i dati (una o più volte).
-5.	release(ino=file_ino)	Chiude il file.
-
-echo ".." > file.txt
-1. lookup	<- controlla se il file è già noto	chiama /exists?path=pino.txt o restituisci ENOENT
-create	crea solo inode fittizio	non fare nulla sul server
-2. write	<- invia direttamente PUT /files con path e data	il server creerà o aggiornerà il file
-3. getattr	restituisci attributi 
-
-COSE DA FARE 
-- sistemare la write di un file già esistenete <- penso sia un problema di attributi che la fopen dovrebbe verificare
-- fare un file a parte con il RemoteFS per rendere tutto più ordinato
-- cd va implementata? NAVIGARE il fs in generale 
-- problema se faccio login con un altro utente il mount non si "svuota" le cartelle restano 
-
-PROBLEMI 
-
-- SERVER se ci sono le cartelle già presenti il server quando fa il mount non scrive i file coi permessi nel db e non funzionano
-
-COME TESTARE:
-**/server cargo run 
-**/client cargo run 
-**/client/mount <op. filesystem>
-
-## DAEMON 
-
-- vedere se esiste gia un pid attivo
-ps -p $(cat /tmp/myfs.pid)
-
-- uccidere demone in backend
-kill <PID>
-
-- vedere gli errori
-cat /tmp/myfs.err
-
-# Locale (default 127.0.0.1)
-cargo run
-
-# Con IP remoto
-cargo run -- --server-ip 172.20.10.12
-
-# Con daemon mode
-cargo run -- --daemon --server-ip 172.20.10.12
-
-# Con porta personalizzata
+```bash
+cd client
 cargo run -- --server-ip 192.168.1.100 --server-port 9000
+```
 
+## API HTTP Principali
+
+### Autenticazione
+
+- `POST /auth/register`
+- `POST /auth/login`
+
+### File e directory
+
+- `GET /list/<path>`: lista contenuti directory
+- `GET /files/<path>`: lettura file
+- `PUT /files/<path>`: scrittura/creazione file
+- `POST /mkdir/<path>`: creazione directory
+- `DELETE /files/<path>`: eliminazione file o directory
+- `GET /lookup/<path>`: metadati nodo
+
+## Permessi
+
+Il progetto usa permessi Unix in formato ottale (es. `644`, `755`, `600`) e verifica accessi su owner/group/others.
+
+
+## Sicurezza (Note)
+
+Progetto nato per scopi accademici. Per uso produzione andrebbero aggiunti almeno:
+
+- secret JWT non hardcoded
+- HTTPS
+- rate limiting
+- validazioni input piu strette
+- audit logging
+
+## Tecnologie
+- Rust
+- Axum
+- Tokio
+- Reqwest
+- FUSE (`fuser`)
+- SQLite (`rusqlite`)
+- JWT
+- bcrypt
+
+## Autori
+
+- Alessandro Benvenuti - Politecnico di Torino
+- Irene Bartolini - Politecnico di Torino
